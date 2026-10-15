@@ -24,6 +24,10 @@ namespace qdk::chemistry::data {
  *
  * Physical states use Configuration's binary or spin-half encoding. Symmetry
  * labels describe explicit basis states.
+ * For spin-half sites, |u> = a_alpha^dagger|0>, |d> = a_beta^dagger|0>, and
+ * |2> = a_alpha^dagger a_beta^dagger|0>. Products of these local states are
+ * ordered left-to-right along the chain. A consumer reordering occupied
+ * creation operators must include the fermionic permutation sign.
  */
 class MPSSite {
  public:
@@ -48,6 +52,20 @@ class MPSSite {
    */
   MPSSite(TensorPtr tensor, SectorOrders sector_orders,
           std::vector<Configuration> physical_basis = {});
+
+  /**
+   * @brief Construct a site with trivial symmetry from packed dense storage.
+   * @param packed Matrix with rows (left * physical + physical_index) and
+   * columns right. The site owns its immutable storage independently of input.
+   * @param physical_dimension Positive physical extent; must divide the rows.
+   * @param physical_basis Local basis, with the same defaults as MPSSite().
+   * @return Site preserving the input scalar type, coefficients and phase.
+   * @throws std::invalid_argument for empty or incompatible dimensions,
+   * invalid local basis, or nonfinite entries.
+   */
+  static MPSSite from_dense(DenseMatrixVariant packed,
+                            std::size_t physical_dimension = 4,
+                            std::vector<Configuration> physical_basis = {});
 
   /** @brief Immutable symmetry-blocked site tensor. */
   const TensorVariant& tensor() const { return *_tensor; }
@@ -106,6 +124,8 @@ class MPSSite {
  * Each site describes its own local basis. Particle counts, the orthogonality
  * center, and supplied RDMs are optional. The site-to-orbital order defaults to
  * identity. RDM indices use active-orbital order, not MPS chain order.
+ * The permutation is stored without changing tensor entries or their phases;
+ * conversion to a different fermionic mode order is the consumer's task.
  */
 class MPSContainer : public WavefunctionContainer {
  public:
@@ -133,8 +153,15 @@ class MPSContainer : public WavefunctionContainer {
    * @param two_rdm_bbbb Optional flattened beta-beta-beta-beta 2-RDM block.
    * RDMs use the same conventions and real/complex storage as
    * StateVectorContainer. They are supplied data, not computed from the sites.
+   * They represent normalized expectation values, independent of tensor scale.
+   * Supply both spin blocks of a 1-RDM, or all three spin blocks of a 2-RDM;
+   * missing spin channels are not inferred. Each 1-RDM is n by n and each
+   * flattened 2-RDM has n^4 entries, where n is the number of active sites.
+   * Dimensions and finiteness are checked; physical consistency with the
+   * tensors remains the producer's responsibility.
    * @throws std::invalid_argument for null sites/basis, incompatible bonds or
-   * scalar types, or invalid site counts, permutations or center indices.
+   * scalar types, invalid site counts, permutations or center indices, or
+   * incomplete, incorrectly sized or nonfinite RDMs.
    */
   MPSContainer(
       std::vector<SitePtr> sites, std::shared_ptr<Orbitals> orbitals,
@@ -216,11 +243,20 @@ class MPSContainer : public WavefunctionContainer {
   ScalarVariant overlap(const WavefunctionContainer& other) const override;
   /** @brief Unsupported MPS norm; throws std::runtime_error. */
   double norm() const override;
-  /** @brief Unsupported total orbital occupations; throws std::runtime_error.
+  /**
+   * @brief Embed active natural occupations into the full orbital space.
+   * Inactive orbitals have unit occupation per channel and virtual orbitals
+   * have zero occupation, following StateVectorContainer conventions.
+   * @throws std::runtime_error if the required Hermitian 1-RDM is unavailable.
    */
   std::shared_ptr<const SymmetryBlockedTensor<1>> total_orbital_occupations()
       const override;
-  /** @brief Unsupported active orbital occupations; throws std::runtime_error.
+  /**
+   * @brief Descending natural occupation eigenvalues of supplied 1-RDMs.
+   * Spin bases require explicit alpha and beta RDMs, diagonalized separately.
+   * Spin-free bases use the spin-traced RDM. Particle counts never imply a
+   * spin decomposition. Real and complex Hermitian RDMs are supported.
+   * @throws std::runtime_error if the required Hermitian 1-RDM is unavailable.
    */
   std::shared_ptr<const SymmetryBlockedTensor<1>> active_orbital_occupations()
       const override;
@@ -255,6 +291,8 @@ class MPSContainer : public WavefunctionContainer {
  protected:
   /**
    * @brief Hash defining tensor data and metadata, excluding cached RDMs.
+   * Identifies the stored state, not the supplied property cache. Do not use
+   * this hash alone as a cache key for producer-supplied RDM-derived values.
    * @param ctx Content-hash context to update.
    */
   void hash_update(qdk::chemistry::utils::HashContext& ctx) const override;
@@ -269,6 +307,8 @@ class MPSContainer : public WavefunctionContainer {
   /** @brief Validate site/basis counts, adjacent bonds, boundaries, and
    * ordering. */
   void _validate() const;
+  /** @brief Check all supplied RDM channels, dimensions and finiteness. */
+  void _validate_rdms() const;
   /** @brief Serialize chain metadata without binary tensors, orbitals, or RDMs.
    */
   nlohmann::json _metadata_to_json() const;

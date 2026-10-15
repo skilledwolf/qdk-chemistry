@@ -9,6 +9,7 @@
 #include <limits>
 #include <numeric>
 #include <qdk/chemistry/data/configuration_set.hpp>
+#include <qdk/chemistry/data/symmetry/spin_channel_indices.hpp>
 #include <qdk/chemistry/data/wavefunction_containers/mps_wavefunction.hpp>
 #include <stdexcept>
 #include <type_traits>
@@ -74,6 +75,24 @@ std::vector<Configuration> default_physical_basis(std::size_t dimension) {
         "MPS sites outside dimension two or four require a physical basis.");
   }
   return basis;
+}
+
+Eigen::VectorXd natural_occupations(const ContainerTypes::MatrixVariant& rdm) {
+  return std::visit(
+      [](const auto& matrix) -> Eigen::VectorXd {
+        if (!matrix.isApprox(matrix.adjoint())) {
+          throw std::runtime_error(
+              "Natural occupations require a Hermitian 1-RDM.");
+        }
+        using Matrix = std::decay_t<decltype(matrix)>;
+        Eigen::SelfAdjointEigenSolver<Matrix> solver(matrix,
+                                                     Eigen::EigenvaluesOnly);
+        if (solver.info() != Eigen::Success) {
+          throw std::runtime_error("Failed to diagonalize MPS 1-RDM.");
+        }
+        return solver.eigenvalues().reverse().eval();
+      },
+      rdm);
 }
 
 std::size_t read_index(const nlohmann::json& value) {
@@ -185,6 +204,41 @@ MPSSite::MPSSite(TensorPtr tensor, SectorOrders sector_orders,
     _physical_basis = default_physical_basis(physical_dimension());
   }
   _validate();
+}
+
+MPSSite MPSSite::from_dense(DenseMatrixVariant packed,
+                            std::size_t physical_dimension,
+                            std::vector<Configuration> physical_basis) {
+  return std::visit(
+      [&](auto& matrix) {
+        if (physical_dimension == 0 || matrix.rows() == 0 ||
+            matrix.cols() == 0 ||
+            static_cast<std::size_t>(matrix.rows()) % physical_dimension != 0) {
+          throw std::invalid_argument(
+              "Dense MPS shape must have positive dimensions and rows "
+              "divisible "
+              "by the physical dimension.");
+        }
+        using Matrix = std::decay_t<decltype(matrix)>;
+        using SBT = SymmetryBlockedTensor<3, typename Matrix::Scalar>;
+        const auto trivial =
+            std::make_shared<const SymmetryProduct>(SymmetryProduct::trivial());
+        const SymmetryLabel label;
+        typename SBT::ExtentsArray extents;
+        extents[0][label] =
+            static_cast<std::size_t>(matrix.rows()) / physical_dimension;
+        extents[1][label] = physical_dimension;
+        extents[2][label] = static_cast<std::size_t>(matrix.cols());
+        typename SBT::BlockMap blocks{
+            {{label, label, label},
+             std::make_shared<const Matrix>(std::move(matrix))}};
+        return MPSSite(std::make_shared<const TensorVariant>(
+                           SBT({trivial, trivial, trivial}, std::move(extents),
+                               std::move(blocks))),
+                       SectorOrders{{{label}, {label}, {label}}},
+                       std::move(physical_basis));
+      },
+      packed);
 }
 
 void MPSSite::_validate() const {
@@ -321,12 +375,108 @@ MPSContainer::MPSContainer(
       _active_num_particles(std::move(active_num_particles)),
       _orthogonality_center(orthogonality_center),
       _site_to_orbital_order(std::move(site_to_orbital_order)) {
+  if (one_rdm_aa.has_value() != one_rdm_bb.has_value()) {
+    throw std::invalid_argument(
+        "MPS requires both spin blocks of a supplied 1-RDM.");
+  }
+  if (two_rdm_aaaa.has_value() != two_rdm_aabb.has_value() ||
+      two_rdm_aaaa.has_value() != two_rdm_bbbb.has_value()) {
+    throw std::invalid_argument(
+        "MPS requires all three spin blocks of a supplied 2-RDM.");
+  }
   if (_site_to_orbital_order.empty()) {
     _site_to_orbital_order.resize(num_sites());
     std::iota(_site_to_orbital_order.begin(), _site_to_orbital_order.end(),
               std::size_t{});
   }
   _validate();
+  _validate_rdms();
+}
+
+void MPSContainer::_validate_rdms() const {
+  const auto n = static_cast<Eigen::Index>(num_sites());
+  const auto symmetry = _orbitals->symmetries();
+  if ((_active_one_rdm || _active_two_rdm) && symmetry &&
+      symmetry->has_axis(AxisName::Spin) &&
+      spin_channel_indices(_orbitals->active_indices(), axes::beta()).size() !=
+          num_sites()) {
+    throw std::invalid_argument(
+        "MPS spin RDM dimensions must match both active spin spaces.");
+  }
+  auto validate_spin_spaces = [this](const auto& tensor) {
+    for (std::size_t slot = 0; slot < tensor.extents().size(); ++slot) {
+      for (const auto& [label, extent] : tensor.extents()[slot]) {
+        if (extent != num_sites()) {
+          throw std::invalid_argument(
+              "MPS RDM extents must match the active sites.");
+        }
+      }
+      for (const auto& axis : tensor.symmetries()[slot]->axes()) {
+        if (axis.equivalent()) {
+          throw std::invalid_argument(
+              "MPS RDM spin blocks must be supplied independently.");
+        }
+      }
+    }
+  };
+  auto validate_one = [n](const auto& matrix) {
+    if (matrix.rows() != n || matrix.cols() != n || !matrix.allFinite()) {
+      throw std::invalid_argument(
+          "MPS 1-RDM must be finite and have shape (active sites, active "
+          "sites).");
+    }
+  };
+  if (_one_rdm_spin_traced) std::visit(validate_one, *_one_rdm_spin_traced);
+  if (_active_one_rdm) {
+    std::visit(
+        [&](const auto& tensor) {
+          validate_spin_spaces(tensor);
+          if (tensor.num_blocks() != 2 ||
+              !tensor.has_block({axes::alpha(), axes::alpha()}) ||
+              !tensor.has_block({axes::beta(), axes::beta()})) {
+            throw std::invalid_argument(
+                "MPS requires both spin blocks of a supplied 1-RDM.");
+          }
+          for (const auto& [labels, block] : tensor.blocks())
+            validate_one(*block);
+        },
+        *_active_one_rdm);
+  }
+  if (!_two_rdm_spin_traced && !_active_two_rdm) return;
+  std::size_t size = 1;
+  for (int axis = 0; axis < 4; ++axis) {
+    if (num_sites() > index_limit / size) {
+      throw std::invalid_argument("MPS 2-RDM size exceeds Eigen::Index.");
+    }
+    size *= num_sites();
+  }
+  auto validate_two = [size](const auto& vector) {
+    if (vector.size() != static_cast<Eigen::Index>(size) ||
+        !vector.allFinite()) {
+      throw std::invalid_argument(
+          "MPS 2-RDM must be finite and contain (active sites)^4 entries.");
+    }
+  };
+  if (_two_rdm_spin_traced) std::visit(validate_two, *_two_rdm_spin_traced);
+  if (_active_two_rdm) {
+    std::visit(
+        [&](const auto& tensor) {
+          validate_spin_spaces(tensor);
+          if (tensor.num_blocks() != 3 ||
+              !tensor.has_block({axes::alpha(), axes::alpha(), axes::alpha(),
+                                 axes::alpha()}) ||
+              !tensor.has_block(
+                  {axes::alpha(), axes::alpha(), axes::beta(), axes::beta()}) ||
+              !tensor.has_block(
+                  {axes::beta(), axes::beta(), axes::beta(), axes::beta()})) {
+            throw std::invalid_argument(
+                "MPS requires all three spin blocks of a supplied 2-RDM.");
+          }
+          for (const auto& [labels, block] : tensor.blocks())
+            validate_two(*block);
+        },
+        *_active_two_rdm);
+  }
 }
 
 void MPSContainer::_validate() const {
@@ -423,14 +573,53 @@ double MPSContainer::norm() const {
 
 std::shared_ptr<const SymmetryBlockedTensor<1>>
 MPSContainer::total_orbital_occupations() const {
-  throw std::runtime_error(
-      "Orbital occupations are not implemented for MPS wavefunctions.");
+  const auto active = active_orbital_occupations();
+  const auto sym = _orbitals->symmetries();
+  const bool has_spin = sym && sym->has_axis(AxisName::Spin);
+  const auto count =
+      static_cast<Eigen::Index>(_orbitals->get_num_molecular_orbitals());
+  auto embed = [&](const auto& spin) -> Eigen::VectorXd {
+    Eigen::VectorXd result = Eigen::VectorXd::Zero(count);
+    for (const auto index :
+         spin_channel_indices(_orbitals->inactive_indices(), spin)) {
+      result(static_cast<Eigen::Index>(index)) = 1.;
+    }
+    const auto indices =
+        spin_channel_indices(_orbitals->active_indices(), spin);
+    const auto& values =
+        active->block({has_spin ? SymmetryLabel(spin) : SymmetryLabel{}});
+    if (indices.size() != static_cast<std::size_t>(values.size())) {
+      throw std::runtime_error(
+          "MPS active orbital indices do not match the supplied 1-RDM.");
+    }
+    for (std::size_t i = 0; i < indices.size(); ++i) {
+      result(static_cast<Eigen::Index>(indices[i])) =
+          values(static_cast<Eigen::Index>(i));
+    }
+    return result;
+  };
+  return _make_orbital_occupations(
+      embed(axes::alpha()),
+      has_spin ? embed(axes::beta()) : Eigen::VectorXd::Zero(count).eval());
 }
 
 std::shared_ptr<const SymmetryBlockedTensor<1>>
 MPSContainer::active_orbital_occupations() const {
-  throw std::runtime_error(
-      "Orbital occupations are not implemented for MPS wavefunctions.");
+  const auto sym = _orbitals->symmetries();
+  if (sym && sym->has_axis(AxisName::Spin)) {
+    if (!_active_one_rdm) {
+      throw std::runtime_error(
+          "MPS spin-resolved occupations require both spin blocks of the "
+          "1-RDM.");
+    }
+    const auto [aa, bb] = get_active_one_rdm_spin_dependent();
+    return _make_orbital_occupations(natural_occupations(aa),
+                                     natural_occupations(bb));
+  }
+  const auto occupations =
+      natural_occupations(get_active_one_rdm_spin_traced());
+  return _make_orbital_occupations(occupations,
+                                   Eigen::VectorXd::Zero(occupations.size()));
 }
 
 void MPSContainer::clear_caches() const {}
@@ -506,6 +695,7 @@ std::unique_ptr<MPSContainer> MPSContainer::from_json(
     auto result = mps_from_metadata(
         json, Orbitals::from_json(json.at("orbitals")), std::move(sites));
     result->_deserialize_rdms_from_json(json);
+    result->_validate_rdms();
     return result;
   } catch (const nlohmann::json::exception& error) {
     throw std::runtime_error("Failed to parse MPSContainer from JSON: " +
@@ -573,6 +763,7 @@ std::unique_ptr<MPSContainer> MPSContainer::from_hdf5(H5::Group& group) {
     auto result = mps_from_metadata(json, Orbitals::from_hdf5(orbitals),
                                     std::move(sites));
     result->_deserialize_rdms_from_hdf5(group);
+    result->_validate_rdms();
     return result;
   } catch (const H5::Exception& error) {
     throw std::runtime_error("Failed to read MPS HDF5: " +

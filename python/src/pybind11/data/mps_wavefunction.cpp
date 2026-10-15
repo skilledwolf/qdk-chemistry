@@ -4,6 +4,7 @@
 
 #include <pybind11/complex.h>
 #include <pybind11/eigen.h>
+#include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
@@ -22,6 +23,29 @@ namespace py = pybind11;
 using namespace qdk::chemistry::data;
 
 namespace {
+
+template <typename Scalar>
+MPSSite site_from_dense(const py::array& values,
+                        std::vector<Configuration> physical_basis) {
+  const auto array = py::array_t<Scalar, py::array::forcecast>::ensure(values);
+  if (!array) {
+    throw py::type_error(
+        "MPS dense site requires a real or complex numeric array.");
+  }
+  const auto input = array.template unchecked<3>();
+  Eigen::Matrix<Scalar, Eigen::Dynamic, Eigen::Dynamic> packed(
+      input.shape(0) * input.shape(1), input.shape(2));
+  for (py::ssize_t left = 0; left < input.shape(0); ++left) {
+    for (py::ssize_t physical = 0; physical < input.shape(1); ++physical) {
+      for (py::ssize_t right = 0; right < input.shape(2); ++right) {
+        packed(left * input.shape(1) + physical, right) =
+            input(left, physical, right);
+      }
+    }
+  }
+  return MPSSite::from_dense(std::move(packed), input.shape(1),
+                             std::move(physical_basis));
+}
 
 template <typename Scalar>
 std::shared_ptr<MPSSite> site_from_tensor(
@@ -56,6 +80,32 @@ void bind_mps_wavefunction(py::module& data) {
            py::arg("left_sector_order"), py::arg("physical_sector_order"),
            py::arg("right_sector_order"),
            py::arg("physical_basis") = std::vector<Configuration>{})
+      .def_static(
+          "from_dense",
+          [](const py::array& values,
+             std::vector<Configuration> physical_basis) {
+            if (values.ndim() != 3) {
+              throw py::value_error(
+                  "MPS dense site requires a rank-3 (left, physical, right) "
+                  "array.");
+            }
+            const auto kind = values.dtype().kind();
+            if (kind == 'c') {
+              return site_from_dense<std::complex<double>>(
+                  values, std::move(physical_basis));
+            }
+            if (kind == 'b' || kind == 'i' || kind == 'u' || kind == 'f') {
+              return site_from_dense<double>(values, std::move(physical_basis));
+            }
+            throw py::type_error(
+                "MPS dense site requires a real or complex numeric array.");
+          },
+          py::arg("array"),
+          py::arg("physical_basis") = std::vector<Configuration>{},
+          "Copy a (left, physical, right) array into one trivial-symmetry "
+          "block. Real and complex numeric arrays, including strided arrays, "
+          "are stored as float64 or complex128. The default physical basis is "
+          "(0,1) for dimension two or (0,u,d,2) for dimension four.")
       .def_property_readonly(
           "tensor",
           [](const MPSSite& site) {
@@ -127,10 +177,6 @@ void bind_mps_wavefunction(py::module& data) {
       .def_property_readonly("orbitals", &MPSContainer::get_orbitals)
       .def("has_total_num_particles", &MPSContainer::has_total_num_particles)
       .def("has_active_num_particles", &MPSContainer::has_active_num_particles)
-      .def_property_readonly("total_num_particles",
-                             &MPSContainer::total_num_particles)
-      .def_property_readonly("active_num_particles",
-                             &MPSContainer::active_num_particles)
       .def_property_readonly("orthogonality_center",
                              &MPSContainer::orthogonality_center,
                              "Asserted canonical center, or None if unknown.")
@@ -139,7 +185,6 @@ void bind_mps_wavefunction(py::module& data) {
                              "Permutation of active-mode slots, not full "
                              "orbital indices.")
       .def_property_readonly("num_sites", &MPSContainer::num_sites)
-      .def_property_readonly("is_complex", &MPSContainer::is_complex)
       .def_property_readonly("max_bond_dimension",
                              &MPSContainer::max_bond_dimension)
       .def(

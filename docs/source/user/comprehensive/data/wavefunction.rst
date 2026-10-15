@@ -132,6 +132,116 @@ The same container holds coupled cluster amplitudes when tagged as ``CCSD``:
       :start-after: // start-cell-create-cc
       :end-before: // end-cell-create-cc
 
+Matrix product state container
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+:class:`~qdk_chemistry.data.MPSContainer` stores an open-boundary matrix product
+state supplied by an external producer. Each :class:`~qdk_chemistry.data.MPSSite`
+has tensor axes ``(left bond, physical state, right bond)``. Its dense export is
+packed as a matrix with row ``left * physical_dimension + physical`` and column
+``right``. The container preserves the supplied coefficients, including their
+scale and complex phase; construction and serialization do not normalize or
+canonicalize the state.
+
+For example, dense arrays can be imported without constructing symmetry blocks:
+
+.. code-block:: python
+
+   import numpy as np
+   from qdk_chemistry.data import ModelOrbitals, MPSContainer, MPSSite, Wavefunction
+
+   # (|2u> + i|u2>)/sqrt(2), with physical indices ordered as (0,u,d,2).
+   first = np.zeros((1, 4, 2), dtype=complex)
+   second = np.zeros((2, 4, 1), dtype=complex)
+   first[0, 3, 0], first[0, 1, 1] = 1 / np.sqrt(2), 1j / np.sqrt(2)
+   second[0, 1, 0], second[1, 3, 0] = 1, 1
+   wavefunction = Wavefunction(MPSContainer(
+       [MPSSite.from_dense(first), MPSSite.from_dense(second)], ModelOrbitals(2)
+   ))
+
+Supplied RDMs describe normalized expectation values, independently of the
+scale of the stored tensors. Each 1-RDM must have shape ``(n,n)`` and each
+flattened 2-RDM must contain ``n**4`` finite entries, where ``n`` is the number
+of active sites. Supply both spin blocks of a 1-RDM or all three spin blocks
+of a 2-RDM; missing spin channels are not inferred. These structural checks
+do not establish physical consistency between the supplied RDMs and tensors.
+
+Natural occupations are descending eigenvalues of supplied Hermitian 1-RDMs;
+they require no tensor contraction. A spin basis requires explicit alpha and
+beta blocks, which are diagonalized separately. A spin-free basis uses the
+spin-traced 1-RDM. Equal particle counts alone do not justify splitting a
+spin-traced RDM. The content hash identifies the stored state and excludes
+supplied RDM caches, so it is insufficient by itself as a cache key for
+RDM-derived properties.
+
+Fermionic coefficient convention
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The default four-state physical basis ``(0,u,d,2)`` denotes
+
+.. math::
+
+   |0\rangle = |\mathrm{vac}\rangle,\qquad
+   |u\rangle = a^\dagger_\alpha |\mathrm{vac}\rangle,\qquad
+   |d\rangle = a^\dagger_\beta |\mathrm{vac}\rangle,\qquad
+   |2\rangle = a^\dagger_\alpha a^\dagger_\beta |\mathrm{vac}\rangle.
+
+Creation operators are written from left to right in chain-site order, with
+alpha before beta within each site. Contracting the tensors gives coefficients
+in that ordered product basis. An explicit ``physical_basis`` may reorder or
+restrict the local configurations; it does not change their phases. The binary
+basis ``(0,1)`` similarly denotes the vacuum and one occupied spinless mode.
+
+``site_to_orbital_order[s]`` identifies the active-orbital slot represented by
+chain site ``s``; an omitted order is the identity permutation. These are
+active-space slots, not indices in the full molecular-orbital basis. The
+container stores the mapping without rearranging tensors or changing signs.
+Supplied RDM indices already follow active-orbital order.
+
+To obtain determinant coefficients in blocked spin-orbital order
+``(alpha_0, ..., alpha_n-1, beta_0, ..., beta_n-1)``, a consumer must map each
+creation operator through ``site_to_orbital_order`` and multiply the contracted
+coefficient by the parity of the permutation that sorts the occupied modes.
+This sign is required even for identity site order: ``|2u>`` creates
+:math:`a^\dagger_{0\alpha}a^\dagger_{0\beta}a^\dagger_{1\alpha}`,
+which needs one exchange to reach blocked order. Purely permuting occupation
+labels does not perform this fermionic transformation. Spinless modes require
+the same sign rule when their site order is permuted.
+
+A small solver-independent reference state is
+
+.. math::
+
+   |\Psi\rangle = \tfrac12\left(|2u0\rangle + i|u02\rangle
+                    - |udu\rangle - i|02u\rangle\right).
+
+For ``site_to_orbital_order = [2,0,1]``, its nonzero determinant coefficients
+are listed below. Bit strings are written as
+``alpha_0 alpha_1 alpha_2 beta_0 beta_1 beta_2``, left to right.
+
+.. list-table:: Signed reference amplitudes
+   :header-rows: 1
+
+   * - Chain configuration
+     - Blocked occupation bits
+     - Coefficient
+   * - ``2u0``
+     - ``101001``
+     - :math:`1/2`
+   * - ``u02``
+     - ``011010``
+     - :math:`-i/2`
+   * - ``udu``
+     - ``011100``
+     - :math:`-1/2`
+   * - ``02u``
+     - ``110100``
+     - :math:`i/2`
+
+``python/tests/test_mps_conventions.py`` constructs this state directly from
+dense site tensors and checks these amplitudes before and after JSON and HDF5
+round trips. The fixture requires no external MPS solver.
+
 Properties
 ~~~~~~~~~~
 

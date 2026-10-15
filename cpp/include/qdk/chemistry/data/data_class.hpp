@@ -88,8 +88,10 @@ class DataClass {
    *
    * Returns a truncated hex digest (16 hex chars = 64 bits by default). Two
    * objects with identical defining data will produce identical hashes within a
-   * compatible build. Lazy/cached data is excluded; only constructor-supplied
-   * data participates. Content hashes are cache keys for checkpoint/restart
+   * compatible build. Only defining data participates; derived caches are
+   * excluded even when supplied at construction. Consult each data class for
+   * its defining fields before using the hash to cache derived results.
+   * Content hashes are cache keys for checkpoint/restart
    * workflows, not stable archival identifiers across releases.
    *
    * @param truncate_chars Number of hex characters in the result (default 16)
