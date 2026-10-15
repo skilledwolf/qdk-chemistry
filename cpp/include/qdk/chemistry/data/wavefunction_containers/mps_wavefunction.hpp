@@ -163,7 +163,7 @@ class MPSContainer : public WavefunctionContainer {
    * Missing independent blocks are not inferred from the orbital basis or
    * particle counts. Blocked inputs currently support the two-channel spin
    * index spaces used by the wavefunction RDM accessors: aa/bb for rank two,
-   * aaaa/aabb/bbbb for rank four, and optionally bbaa aliasing aabb.
+   * aaaa/aabb/bbbb for rank four, and optionally an explicit bbaa block.
    * Raw and blocked inputs for the same rank are mutually exclusive; a traced
    * RDM may be supplied alongside either representation. Each 1-RDM is n by n
    * and each flattened 2-RDM has n^4 entries, where n is the number of active
@@ -257,7 +257,7 @@ class MPSContainer : public WavefunctionContainer {
   ScalarVariant overlap(const WavefunctionContainer& other) const override;
   /**
    * @brief Trace the supplied 2-RDM, honoring explicitly equivalent blocks.
-   * A stored bbaa alias is used directly; otherwise the three-block convention
+   * A stored bbaa block is used directly; otherwise the three-block convention
    * reconstructs bbaa by exchanging the two index pairs of aabb.
    */
   const VectorVariant& get_active_two_rdm_spin_traced() const override;

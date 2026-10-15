@@ -284,6 +284,35 @@ def test_declared_rdm_equivalence_roundtrip(site_data, complex_values, tmp_path)
             np.testing.assert_allclose(occupations.block([label]), [0.75, 0.25])
 
 
+@pytest.mark.parametrize("complex_values", [False, True])
+def test_independent_two_rdm_blocks_roundtrip(site_data, complex_values, tmp_path):
+    """Explicitly stored mixed blocks are retained without an equivalence declaration."""
+    labels = {"a": sym.SymmetryLabel([sym.axes.alpha()]), "b": sym.SymmetryLabel([sym.axes.beta()])}
+    blocks = {
+        key: np.arange(16, dtype=float) + 20 * index for index, key in enumerate(("aaaa", "aabb", "bbaa", "bbbb"))
+    }
+    if complex_values:
+        blocks = {key: values + 1j * (index + 1) for index, (key, values) in enumerate(blocks.items())}
+    original = Wavefunction(
+        MPSContainer(
+            [MPSSite.from_dense(values) for values in site_data],
+            ModelOrbitals(2),
+            active_two_rdm=_blocked_rdm(4, blocks, equivalent=False),
+        )
+    )
+    restored = [original, Wavefunction.from_json(original.to_json())]
+    path = tmp_path / "independent-rdms.wavefunction.h5"
+    original.to_file(path, "hdf5")
+    restored.append(Wavefunction.from_file(path, "hdf5"))
+
+    for wavefunction in restored:
+        tensor = wavefunction.get_container().active_two_rdm()
+        assert all(not slot.axis(sym.AxisName.Spin).equivalent() for slot in tensor.symmetries())
+        for key, expected in blocks.items():
+            np.testing.assert_array_equal(tensor.block(tuple(labels[label] for label in key)), expected)
+        np.testing.assert_array_equal(wavefunction.get_active_two_rdm_spin_traced(), sum(blocks.values()))
+
+
 def test_explicit_zero_rdm_block_is_preserved(site_data):
     """An independent zero block is available data, even with equivalent orbitals."""
     one = np.diag([0.8, 0.2])

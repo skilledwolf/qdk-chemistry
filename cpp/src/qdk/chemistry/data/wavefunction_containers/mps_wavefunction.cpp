@@ -95,6 +95,47 @@ Eigen::VectorXd natural_occupations(const ContainerTypes::MatrixVariant& rdm) {
       rdm);
 }
 
+std::shared_ptr<const SymmetryBlockedTensorVariant<2>> normalize_one_rdm(
+    const std::optional<SymmetryBlockedTensorVariant<2>>& blocked,
+    const std::optional<ContainerTypes::MatrixVariant>& aa,
+    const std::optional<ContainerTypes::MatrixVariant>& bb) {
+  if (blocked && (aa || bb)) {
+    throw std::invalid_argument(
+        "MPS raw and blocked RDM inputs for the same rank are mutually "
+        "exclusive.");
+  }
+  if (aa.has_value() != bb.has_value()) {
+    throw std::invalid_argument(
+        "MPS requires both spin blocks of a supplied 1-RDM.");
+  }
+  if (blocked) {
+    return std::make_shared<const SymmetryBlockedTensorVariant<2>>(*blocked);
+  }
+  return aa ? make_spin_diagonal_rank2_sbt_variant(*aa, *bb, false) : nullptr;
+}
+
+std::shared_ptr<const SymmetryBlockedTensorVariant<4>> normalize_two_rdm(
+    const std::optional<SymmetryBlockedTensorVariant<4>>& blocked,
+    const std::optional<ContainerTypes::VectorVariant>& aaaa,
+    const std::optional<ContainerTypes::VectorVariant>& aabb,
+    const std::optional<ContainerTypes::VectorVariant>& bbbb) {
+  if (blocked && (aaaa || aabb || bbbb)) {
+    throw std::invalid_argument(
+        "MPS raw and blocked RDM inputs for the same rank are mutually "
+        "exclusive.");
+  }
+  if (aaaa.has_value() != aabb.has_value() ||
+      aaaa.has_value() != bbbb.has_value()) {
+    throw std::invalid_argument(
+        "MPS requires all three spin blocks of a supplied 2-RDM.");
+  }
+  if (blocked) {
+    return std::make_shared<const SymmetryBlockedTensorVariant<4>>(*blocked);
+  }
+  return aaaa ? make_spin_diagonal_rank4_sbt_variant(*aaaa, *aabb, *bbbb, false)
+              : nullptr;
+}
+
 std::size_t read_index(const nlohmann::json& value) {
   if (!value.is_number_integer() ||
       (!value.is_number_unsigned() && value.get<std::int64_t>() < 0) ||
@@ -368,38 +409,22 @@ MPSContainer::MPSContainer(
     const std::optional<VectorVariant>& two_rdm_bbbb,
     const std::optional<SymmetryBlockedTensorVariant<2>>& active_one_rdm,
     const std::optional<SymmetryBlockedTensorVariant<4>>& active_two_rdm)
-    : WavefunctionContainer(one_rdm_spin_traced, one_rdm_aa, one_rdm_bb,
-                            two_rdm_spin_traced, two_rdm_aaaa, two_rdm_aabb,
-                            two_rdm_bbbb),
+    : WavefunctionContainer(
+          one_rdm_spin_traced
+              ? std::make_shared<MatrixVariant>(*one_rdm_spin_traced)
+              : nullptr,
+          two_rdm_spin_traced
+              ? std::make_shared<VectorVariant>(*two_rdm_spin_traced)
+              : nullptr,
+          normalize_one_rdm(active_one_rdm, one_rdm_aa, one_rdm_bb),
+          normalize_two_rdm(active_two_rdm, two_rdm_aaaa, two_rdm_aabb,
+                            two_rdm_bbbb)),
       _sites(std::move(sites)),
       _orbitals(std::move(orbitals)),
       _total_num_particles(std::move(total_num_particles)),
       _active_num_particles(std::move(active_num_particles)),
       _orthogonality_center(orthogonality_center),
       _site_to_orbital_order(std::move(site_to_orbital_order)) {
-  if ((active_one_rdm && (one_rdm_aa || one_rdm_bb)) ||
-      (active_two_rdm && (two_rdm_aaaa || two_rdm_aabb || two_rdm_bbbb))) {
-    throw std::invalid_argument(
-        "MPS raw and blocked RDM inputs for the same rank are mutually "
-        "exclusive.");
-  }
-  if (active_one_rdm) {
-    _active_one_rdm = std::make_shared<const SymmetryBlockedTensorVariant<2>>(
-        *active_one_rdm);
-  }
-  if (active_two_rdm) {
-    _active_two_rdm = std::make_shared<const SymmetryBlockedTensorVariant<4>>(
-        *active_two_rdm);
-  }
-  if (one_rdm_aa.has_value() != one_rdm_bb.has_value()) {
-    throw std::invalid_argument(
-        "MPS requires both spin blocks of a supplied 1-RDM.");
-  }
-  if (two_rdm_aaaa.has_value() != two_rdm_aabb.has_value() ||
-      two_rdm_aaaa.has_value() != two_rdm_bbbb.has_value()) {
-    throw std::invalid_argument(
-        "MPS requires all three spin blocks of a supplied 2-RDM.");
-  }
   if (_site_to_orbital_order.empty()) {
     _site_to_orbital_order.resize(num_sites());
     std::iota(_site_to_orbital_order.begin(), _site_to_orbital_order.end(),
@@ -481,14 +506,10 @@ void MPSContainer::_validate_rdms() const {
     std::visit(
         [&](const auto& tensor) {
           validate_spin_spaces(tensor);
-          const typename std::decay_t<decltype(tensor)>::Labels aabb{
-              axes::alpha(), axes::alpha(), axes::beta(), axes::beta()};
           const typename std::decay_t<decltype(tensor)>::Labels bbaa{
               axes::beta(), axes::beta(), axes::alpha(), axes::alpha()};
           if ((tensor.num_blocks() != 3 && tensor.num_blocks() != 4) ||
-              (tensor.num_blocks() == 4 &&
-               (!tensor.has_block(bbaa) || !tensor.has_block(aabb) ||
-                tensor.block_ptr(bbaa) != tensor.block_ptr(aabb))) ||
+              (tensor.num_blocks() == 4 && !tensor.has_block(bbaa)) ||
               !tensor.has_block({axes::alpha(), axes::alpha(), axes::alpha(),
                                  axes::alpha()}) ||
               !tensor.has_block(

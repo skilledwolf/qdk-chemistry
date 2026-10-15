@@ -196,6 +196,12 @@ orbit says nothing about the other orbit. Unsupported block patterns are
 rejected. Missing independent blocks are errors, while explicitly supplied
 zero blocks are valid.
 
+A four-block 2-RDM may also supply ``bbaa`` independently of ``aabb``;
+tracing uses each supplied block directly. Without an explicit fourth block,
+the existing three-block convention exchanges the index pairs of ``aabb``.
+Use ``active_two_rdm()`` to access all four blocks; the legacy
+``get_active_two_rdm_spin_dependent()`` accessor returns three blocks.
+
 The per-channel array arguments remain available: supply both 1-RDM arrays
 or all three 2-RDM arrays. Their omission never declares equivalence. Do not
 combine arrays with a blocked tensor for the same RDM rank. A traced RDM may

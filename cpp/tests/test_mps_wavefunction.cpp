@@ -437,6 +437,13 @@ TEST_F(MPSContainerTest, SuppliedRdms) {
                     H5::FileCreatPropList::DEFAULT, access);
     original.to_hdf5(file);
     std::vector<std::unique_ptr<WavefunctionContainer>> copies;
+    // Raw convenience inputs and canonical blocked inputs must preserve the
+    // same independent blocks and explicitly supplied traced companions.
+    copies.push_back(std::make_unique<MPSContainer>(
+        sites, orbitals, nullptr, nullptr, std::nullopt,
+        std::vector<std::size_t>{}, one[0], std::nullopt, std::nullopt, two[0],
+        std::nullopt, std::nullopt, std::nullopt, original.active_one_rdm(),
+        original.active_two_rdm()));
     copies.push_back(original.clone());
     copies.push_back(MPSContainer::from_json(original.to_json()));
     copies.push_back(MPSContainer::from_hdf5(file));
@@ -787,6 +794,54 @@ TEST_F(MPSContainerTest, BlockedRdmsRequireIndependentRepresentatives) {
   EXPECT_THROW(MPSContainer::from_hdf5(file), std::invalid_argument);
 }
 
+TEST_F(MPSContainerTest, IndependentFourthRdmBlockSurvivesSerialization) {
+  auto check = [&]<typename Scalar>() {
+    using Vector = Tensor<4, Scalar>;
+    using SBT = SymmetryBlockedTensor<4, Scalar>;
+    const typename SBT::Labels aaaa{axes::alpha(), axes::alpha(), axes::alpha(),
+                                    axes::alpha()};
+    const typename SBT::Labels aabb{axes::alpha(), axes::alpha(), axes::beta(),
+                                    axes::beta()};
+    const typename SBT::Labels bbaa{axes::beta(), axes::beta(), axes::alpha(),
+                                    axes::alpha()};
+    const typename SBT::Labels bbbb{axes::beta(), axes::beta(), axes::beta(),
+                                    axes::beta()};
+    const Vector same = Vector::Constant(16, Scalar(0.25));
+    const Vector mixed = Eigen::VectorXd::LinSpaced(16, 0., 0.3).cast<Scalar>();
+    Vector fourth = Eigen::VectorXd::LinSpaced(16, 0.4, 0.8).cast<Scalar>();
+    if constexpr (!std::is_same_v<Scalar, double>) {
+      fourth *= Scalar(1., 0.5);
+    }
+    const auto tensor = make_blocked_rdm<4, Scalar>(
+        {{aaaa, std::make_shared<const Vector>(same)},
+         {aabb, std::make_shared<const Vector>(mixed)},
+         {bbaa, std::make_shared<const Vector>(fourth)},
+         {bbbb, std::make_shared<const Vector>(same)}});
+    auto original = with_blocked_rdms(std::nullopt, tensor);
+    H5::FileAccPropList access;
+    access.setCore(4096, false);
+    H5::H5File file("mps_four_rdm_blocks_in_memory.h5", H5F_ACC_TRUNC,
+                    H5::FileCreatPropList::DEFAULT, access);
+    original.to_hdf5(file);
+    std::vector<std::unique_ptr<WavefunctionContainer>> copies;
+    copies.push_back(original.clone());
+    copies.push_back(MPSContainer::from_json(original.to_json()));
+    copies.push_back(MPSContainer::from_hdf5(file));
+    for (const auto& copy : copies) {
+      const auto& restored = std::get<SBT>(copy->active_two_rdm());
+      EXPECT_FALSE(restored.symmetries()[0]->axis(AxisName::Spin).equivalent());
+      EXPECT_NE(restored.block_ptr(aabb), restored.block_ptr(bbaa));
+      EXPECT_TRUE(restored.block(bbaa).isApprox(fourth));
+      // Synthetic data distinguishes explicit storage from both an alias and
+      // the pair-transpose convention used when only three blocks are supplied.
+      EXPECT_TRUE(std::get<Vector>(copy->get_active_two_rdm_spin_traced())
+                      .isApprox(2 * same + mixed + fourth));
+    }
+  };
+  check.template operator()<double>();
+  check.template operator()<std::complex<double>>();
+}
+
 TEST_F(MPSContainerTest, RejectsConflictingOrUnsupportedBlockedRdms) {
   auto one =
       std::make_shared<const Eigen::MatrixXd>(Eigen::MatrixXd::Identity(2, 2));
@@ -816,13 +871,13 @@ TEST_F(MPSContainerTest, RejectsConflictingOrUnsupportedBlockedRdms) {
                            {{axes::beta(), axes::beta()}, one},
                            {{axes::alpha(), axes::beta()}, one}});
   EXPECT_THROW(with_blocked_rdms(coherences), std::invalid_argument);
-  const auto independent_bbaa = make_blocked_rdm<4>(
+  const auto unsupported_two = make_blocked_rdm<4>(
       {{{axes::alpha(), axes::alpha(), axes::alpha(), axes::alpha()}, zero},
        {{axes::alpha(), axes::alpha(), axes::beta(), axes::beta()}, zero},
        {{axes::beta(), axes::beta(), axes::beta(), axes::beta()}, zero},
-       {{axes::beta(), axes::beta(), axes::alpha(), axes::alpha()},
+       {{axes::alpha(), axes::beta(), axes::alpha(), axes::beta()},
         std::make_shared<const Eigen::VectorXd>(*zero)}});
-  EXPECT_THROW(with_blocked_rdms(std::nullopt, independent_bbaa),
+  EXPECT_THROW(with_blocked_rdms(std::nullopt, unsupported_two),
                std::invalid_argument);
   auto trivial =
       std::make_shared<const SymmetryProduct>(SymmetryProduct::trivial());
