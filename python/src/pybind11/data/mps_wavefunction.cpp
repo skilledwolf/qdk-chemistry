@@ -24,6 +24,24 @@ using namespace qdk::chemistry::data;
 
 namespace {
 
+template <std::size_t Rank>
+using RdmInput = std::variant<
+    std::shared_ptr<const SymmetryBlockedTensor<Rank, double>>,
+    std::shared_ptr<const SymmetryBlockedTensor<Rank, std::complex<double>>>>;
+
+template <std::size_t Rank>
+std::optional<SymmetryBlockedTensorVariant<Rank>> rdm_from_python(
+    const std::optional<RdmInput<Rank>>& value) {
+  if (!value) return std::nullopt;
+  return std::visit(
+      [](const auto& tensor)
+          -> std::optional<SymmetryBlockedTensorVariant<Rank>> {
+        if (!tensor) return std::nullopt;
+        return *tensor;
+      },
+      *value);
+}
+
 template <typename Scalar>
 MPSSite site_from_dense(const py::array& values,
                         std::vector<Configuration> physical_basis) {
@@ -147,32 +165,61 @@ void bind_mps_wavefunction(py::module& data) {
       "have different local bases. Scale, phase and gauge are preserved; "
       "particle counts and canonical center are optional, unverified producer "
       "metadata.")
-      .def(py::init<std::vector<MPSContainer::SitePtr>,
-                    std::shared_ptr<Orbitals>,
-                    std::shared_ptr<const MPSContainer::ParticleCount>,
-                    std::shared_ptr<const MPSContainer::ParticleCount>,
-                    std::optional<std::size_t>, std::vector<std::size_t>,
-                    const std::optional<ContainerTypes::MatrixVariant>&,
-                    const std::optional<ContainerTypes::MatrixVariant>&,
-                    const std::optional<ContainerTypes::MatrixVariant>&,
-                    const std::optional<ContainerTypes::VectorVariant>&,
-                    const std::optional<ContainerTypes::VectorVariant>&,
-                    const std::optional<ContainerTypes::VectorVariant>&,
-                    const std::optional<ContainerTypes::VectorVariant>&>(),
-           py::arg("sites"), py::arg("orbitals"),
-           py::arg("total_num_particles") = nullptr,
-           py::arg("active_num_particles") = nullptr,
-           py::arg("orthogonality_center") = std::nullopt,
-           py::arg("site_to_orbital_order") = std::vector<std::size_t>{},
-           py::arg("one_rdm_spin_traced") = std::nullopt,
-           py::arg("one_rdm_aa") = std::nullopt,
-           py::arg("one_rdm_bb") = std::nullopt,
-           py::arg("two_rdm_spin_traced") = std::nullopt,
-           py::arg("two_rdm_aaaa") = std::nullopt,
-           py::arg("two_rdm_aabb") = std::nullopt,
-           py::arg("two_rdm_bbbb") = std::nullopt,
-           "Store supplied sites and optional real/complex RDM arrays. RDMs "
-           "use active-orbital order. ")
+      .def(
+          py::init(
+              [](std::vector<MPSContainer::SitePtr> sites,
+                 std::shared_ptr<Orbitals> orbitals,
+                 std::shared_ptr<const MPSContainer::ParticleCount>
+                     total_num_particles,
+                 std::shared_ptr<const MPSContainer::ParticleCount>
+                     active_num_particles,
+                 std::optional<std::size_t> orthogonality_center,
+                 std::vector<std::size_t> site_to_orbital_order,
+                 const std::optional<ContainerTypes::MatrixVariant>&
+                     one_rdm_spin_traced,
+                 const std::optional<ContainerTypes::MatrixVariant>& one_rdm_aa,
+                 const std::optional<ContainerTypes::MatrixVariant>& one_rdm_bb,
+                 const std::optional<ContainerTypes::VectorVariant>&
+                     two_rdm_spin_traced,
+                 const std::optional<ContainerTypes::VectorVariant>&
+                     two_rdm_aaaa,
+                 const std::optional<ContainerTypes::VectorVariant>&
+                     two_rdm_aabb,
+                 const std::optional<ContainerTypes::VectorVariant>&
+                     two_rdm_bbbb,
+                 const std::optional<RdmInput<2>>& active_one_rdm,
+                 const std::optional<RdmInput<4>>& active_two_rdm) {
+                return std::make_unique<MPSContainer>(
+                    std::move(sites), std::move(orbitals),
+                    std::move(total_num_particles),
+                    std::move(active_num_particles), orthogonality_center,
+                    std::move(site_to_orbital_order), one_rdm_spin_traced,
+                    one_rdm_aa, one_rdm_bb, two_rdm_spin_traced, two_rdm_aaaa,
+                    two_rdm_aabb, two_rdm_bbbb, rdm_from_python(active_one_rdm),
+                    rdm_from_python(active_two_rdm));
+              }),
+          py::arg("sites"), py::arg("orbitals"),
+          py::arg("total_num_particles") = nullptr,
+          py::arg("active_num_particles") = nullptr,
+          py::arg("orthogonality_center") = std::nullopt,
+          py::arg("site_to_orbital_order") = std::vector<std::size_t>{},
+          py::arg("one_rdm_spin_traced") = std::nullopt,
+          py::arg("one_rdm_aa") = std::nullopt,
+          py::arg("one_rdm_bb") = std::nullopt,
+          py::arg("two_rdm_spin_traced") = std::nullopt,
+          py::arg("two_rdm_aaaa") = std::nullopt,
+          py::arg("two_rdm_aabb") = std::nullopt,
+          py::arg("two_rdm_bbbb") = std::nullopt,
+          py::arg("active_one_rdm") = std::nullopt,
+          py::arg("active_two_rdm") = std::nullopt,
+          "Store supplied sites and optional real/complex RDM arrays. RDMs "
+          "use active-orbital order. Alternatively, active_one_rdm and "
+          "active_two_rdm accept symmetry-blocked tensors in the supported "
+          "spin-diagonal layout. Block equivalence must be explicitly "
+          "declared by the tensor symmetry metadata; missing arrays, "
+          "particle counts and orbital equivalence do not imply RDM block "
+          "equivalence. Do not combine blocked and raw block inputs for "
+          "the same RDM rank.")
       .def_property_readonly("sites", &MPSContainer::sites)
       .def_property_readonly("orbitals", &MPSContainer::get_orbitals)
       .def("has_total_num_particles", &MPSContainer::has_total_num_particles)

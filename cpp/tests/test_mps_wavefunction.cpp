@@ -46,6 +46,19 @@ MPSContainer::SitePtr make_site(
       tensor, MPSSite::SectorOrders{{{label}, {label}, {label}}});
 }
 
+template <std::size_t Rank, typename Scalar = double>
+SymmetryBlockedTensor<Rank, Scalar> make_blocked_rdm(
+    typename SymmetryBlockedTensor<Rank, Scalar>::BlockMap blocks,
+    bool equivalent = false) {
+  using SBT = SymmetryBlockedTensor<Rank, Scalar>;
+  auto symmetry = testing::spin_symmetry(equivalent);
+  typename SBT::SymmetriesArray symmetries;
+  symmetries.fill(symmetry);
+  typename SBT::ExtentsArray extents;
+  extents.fill({{axes::alpha(), 2}, {axes::beta(), 2}});
+  return SBT(symmetries, extents, std::move(blocks));
+}
+
 class MPSContainerTest : public ::testing::Test {
  protected:
   Eigen::MatrixXd random_matrix(Eigen::Index rows, Eigen::Index cols) {
@@ -68,6 +81,15 @@ class MPSContainerTest : public ::testing::Test {
   std::unique_ptr<MPSContainer> make_container() {
     return std::make_unique<MPSContainer>(sites, orbitals, counts, counts, 1,
                                           std::vector<std::size_t>{1, 0});
+  }
+
+  MPSContainer with_blocked_rdms(
+      const std::optional<SymmetryBlockedTensorVariant<2>>& one,
+      const std::optional<SymmetryBlockedTensorVariant<4>>& two =
+          std::nullopt) {
+    return MPSContainer(sites, orbitals, nullptr, nullptr, std::nullopt, {},
+                        std::nullopt, std::nullopt, std::nullopt, std::nullopt,
+                        std::nullopt, std::nullopt, std::nullopt, one, two);
   }
 
   std::mt19937 rng{42};
@@ -652,6 +674,162 @@ TEST_F(MPSContainerTest, RejectsIncompleteSpinRdmGroups) {
                      mask & 4 ? std::optional(two) : std::nullopt),
         std::invalid_argument);
   }
+}
+
+TEST_F(MPSContainerTest, ExplicitRdmEquivalenceSurvivesCopiesAndSerialization) {
+  orbitals = testing::create_test_orbitals(2, 2);
+  auto check = [&]<typename Scalar>() {
+    using Matrix = Tensor<2, Scalar>;
+    using Vector = Tensor<4, Scalar>;
+    Matrix one = Matrix::Identity(2, 2) * Scalar(0.5);
+    if constexpr (std::is_same_v<Scalar, double>) {
+      one(0, 1) = one(1, 0) = 0.25;
+    } else {
+      one(0, 1) = Scalar(0, 0.25);
+      one(1, 0) = Scalar(0, -0.25);
+    }
+    auto one_ptr = std::make_shared<const Matrix>(one);
+    auto zero = std::make_shared<const Vector>(Vector::Zero(16));
+    const Vector mixed = Eigen::VectorXd::LinSpaced(16, 0., 0.3).cast<Scalar>();
+    auto mixed_ptr = std::make_shared<const Vector>(mixed);
+    const auto one_rdm = make_blocked_rdm<2, Scalar>(
+        {{{axes::alpha(), axes::alpha()}, one_ptr}}, true);
+    const auto two_rdm = make_blocked_rdm<4, Scalar>(
+        {{{axes::alpha(), axes::alpha(), axes::alpha(), axes::alpha()}, zero},
+         {{axes::alpha(), axes::alpha(), axes::beta(), axes::beta()},
+          mixed_ptr}},
+        true);
+    auto original = with_blocked_rdms(one_rdm, two_rdm);
+    H5::FileAccPropList access;
+    access.setCore(4096, false);
+    H5::H5File file("mps_equivalent_rdms_in_memory.h5", H5F_ACC_TRUNC,
+                    H5::FileCreatPropList::DEFAULT, access);
+    original.to_hdf5(file);
+    std::vector<std::unique_ptr<WavefunctionContainer>> copies;
+    copies.push_back(original.clone());
+    copies.push_back(MPSContainer::from_json(original.to_json()));
+    copies.push_back(MPSContainer::from_hdf5(file));
+    for (const auto& copy : copies) {
+      const auto& restored_one =
+          std::get<SymmetryBlockedTensor<2, Scalar>>(copy->active_one_rdm());
+      const auto& restored_two =
+          std::get<SymmetryBlockedTensor<4, Scalar>>(copy->active_two_rdm());
+      EXPECT_TRUE(
+          restored_one.symmetries()[0]->axis(AxisName::Spin).equivalent());
+      EXPECT_TRUE(
+          restored_two.symmetries()[0]->axis(AxisName::Spin).equivalent());
+      EXPECT_EQ(restored_one.block_ptr({axes::alpha(), axes::alpha()}),
+                restored_one.block_ptr({axes::beta(), axes::beta()}));
+      EXPECT_EQ(restored_two.block_ptr(
+                    {axes::alpha(), axes::alpha(), axes::beta(), axes::beta()}),
+                restored_two.block_ptr({axes::beta(), axes::beta(),
+                                        axes::alpha(), axes::alpha()}));
+      EXPECT_TRUE(
+          restored_two
+              .block({axes::beta(), axes::beta(), axes::beta(), axes::beta()})
+              .isZero());
+      EXPECT_TRUE(std::get<Matrix>(copy->get_active_one_rdm_spin_traced())
+                      .isApprox(2 * one));
+      // The deliberately asymmetric mixed block distinguishes a declared
+      // bbaa alias from the index-pair transpose used for three raw blocks.
+      EXPECT_TRUE(std::get<Vector>(copy->get_active_two_rdm_spin_traced())
+                      .isApprox(2 * mixed));
+      const Eigen::Vector2d expected(0.75, 0.25);
+      const auto occupations = copy->active_orbital_occupations();
+      EXPECT_TRUE(occupations->block({axes::alpha()}).isApprox(expected));
+      EXPECT_TRUE(occupations->block({axes::beta()}).isApprox(expected));
+    }
+  };
+  check.template operator()<double>();
+  check.template operator()<std::complex<double>>();
+}
+
+TEST_F(MPSContainerTest, BlockedRdmsRequireIndependentRepresentatives) {
+  orbitals = testing::create_test_orbitals(2, 2);
+  ASSERT_TRUE(orbitals->is_restricted());
+  auto one =
+      std::make_shared<const Eigen::MatrixXd>(Eigen::MatrixXd::Identity(2, 2));
+  const auto incomplete_one =
+      make_blocked_rdm<2>({{{axes::alpha(), axes::alpha()}, one}});
+  EXPECT_THROW(with_blocked_rdms(incomplete_one), std::invalid_argument);
+  const auto declared_one =
+      make_blocked_rdm<2>({{{axes::alpha(), axes::alpha()}, one}}, true);
+  EXPECT_NO_THROW(with_blocked_rdms(declared_one));
+
+  auto zero =
+      std::make_shared<const Eigen::VectorXd>(Eigen::VectorXd::Zero(16));
+  const auto incomplete_two = make_blocked_rdm<4>(
+      {{{axes::alpha(), axes::alpha(), axes::alpha(), axes::alpha()}, zero}},
+      true);
+  EXPECT_THROW(with_blocked_rdms(declared_one, incomplete_two),
+               std::invalid_argument);
+  const auto declared_two = make_blocked_rdm<4>(
+      {{{axes::alpha(), axes::alpha(), axes::alpha(), axes::alpha()}, zero},
+       {{axes::alpha(), axes::alpha(), axes::beta(), axes::beta()}, zero}},
+      true);
+  auto complete = with_blocked_rdms(declared_one, declared_two);
+  auto invalid = complete.to_json();
+  invalid["rdms"]["active_two_rdm"] = incomplete_two.to_json();
+  EXPECT_THROW(MPSContainer::from_json(invalid), std::invalid_argument);
+  H5::FileAccPropList access;
+  access.setCore(4096, false);
+  H5::H5File file("mps_missing_block_in_memory.h5", H5F_ACC_TRUNC,
+                  H5::FileCreatPropList::DEFAULT, access);
+  complete.to_hdf5(file);
+  ASSERT_GE(H5Ldelete(file.getId(), "rdms/active_two_rdm", H5P_DEFAULT), 0);
+  auto group = file.createGroup("rdms/active_two_rdm");
+  const hbool_t complex = false;
+  group
+      .createAttribute("is_complex", H5::PredType::NATIVE_HBOOL,
+                       H5::DataSpace(H5S_SCALAR))
+      .write(H5::PredType::NATIVE_HBOOL, &complex);
+  incomplete_two.to_hdf5(group);
+  EXPECT_THROW(MPSContainer::from_hdf5(file), std::invalid_argument);
+}
+
+TEST_F(MPSContainerTest, RejectsConflictingOrUnsupportedBlockedRdms) {
+  auto one =
+      std::make_shared<const Eigen::MatrixXd>(Eigen::MatrixXd::Identity(2, 2));
+  const auto declared_one =
+      make_blocked_rdm<2>({{{axes::alpha(), axes::alpha()}, one}}, true);
+  auto zero =
+      std::make_shared<const Eigen::VectorXd>(Eigen::VectorXd::Zero(16));
+  const auto declared_two = make_blocked_rdm<4>(
+      {{{axes::alpha(), axes::alpha(), axes::alpha(), axes::alpha()}, zero},
+       {{axes::alpha(), axes::alpha(), axes::beta(), axes::beta()}, zero}},
+      true);
+  EXPECT_THROW(
+      MPSContainer(sites, orbitals, nullptr, nullptr, std::nullopt, {},
+                   std::nullopt, ContainerTypes::MatrixVariant{*one},
+                   ContainerTypes::MatrixVariant{*one}, std::nullopt,
+                   std::nullopt, std::nullopt, std::nullopt, declared_one),
+      std::invalid_argument);
+  EXPECT_THROW(MPSContainer(sites, orbitals, nullptr, nullptr, std::nullopt, {},
+                            std::nullopt, std::nullopt, std::nullopt,
+                            std::nullopt, ContainerTypes::VectorVariant{*zero},
+                            ContainerTypes::VectorVariant{*zero},
+                            ContainerTypes::VectorVariant{*zero}, std::nullopt,
+                            declared_two),
+               std::invalid_argument);
+  const auto coherences =
+      make_blocked_rdm<2>({{{axes::alpha(), axes::alpha()}, one},
+                           {{axes::beta(), axes::beta()}, one},
+                           {{axes::alpha(), axes::beta()}, one}});
+  EXPECT_THROW(with_blocked_rdms(coherences), std::invalid_argument);
+  const auto independent_bbaa = make_blocked_rdm<4>(
+      {{{axes::alpha(), axes::alpha(), axes::alpha(), axes::alpha()}, zero},
+       {{axes::alpha(), axes::alpha(), axes::beta(), axes::beta()}, zero},
+       {{axes::beta(), axes::beta(), axes::beta(), axes::beta()}, zero},
+       {{axes::beta(), axes::beta(), axes::alpha(), axes::alpha()},
+        std::make_shared<const Eigen::VectorXd>(*zero)}});
+  EXPECT_THROW(with_blocked_rdms(std::nullopt, independent_bbaa),
+               std::invalid_argument);
+  auto trivial =
+      std::make_shared<const SymmetryProduct>(SymmetryProduct::trivial());
+  const SymmetryBlockedTensor<2> unsupported(
+      {trivial, trivial}, {{{{SymmetryLabel{}, 2}}, {{SymmetryLabel{}, 2}}}},
+      {{{SymmetryLabel{}, SymmetryLabel{}}, one}});
+  EXPECT_THROW(with_blocked_rdms(unsupported), std::invalid_argument);
 }
 
 TEST_F(MPSContainerTest, RejectsInvalidStructure) {

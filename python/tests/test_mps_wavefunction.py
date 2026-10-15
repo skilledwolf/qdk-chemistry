@@ -227,6 +227,103 @@ def test_natural_occupations_from_supplied_rdm(site_data):
         Wavefunction(missing).active_orbital_occupations()
 
 
+def _blocked_rdm(rank, blocks, *, equivalent):
+    """Declare block relations independently of the associated orbital basis."""
+    symmetry = sym.SymmetryProduct([sym.axes.spin(1, equivalent)])
+    labels = {"a": sym.SymmetryLabel([sym.axes.alpha()]), "b": sym.SymmetryLabel([sym.axes.beta()])}
+    scalar_suffix = "Complex" if any(np.iscomplexobj(values) for values in blocks.values()) else ""
+    tensor_type = getattr(sym, f"SymmetryBlockedTensorRank{rank}{scalar_suffix}")
+    return tensor_type(
+        [symmetry] * rank,
+        [{labels["a"]: 2, labels["b"]: 2}] * rank,
+        [(tuple(labels[label] for label in key), values) for key, values in blocks.items()],
+    )
+
+
+@pytest.mark.parametrize("complex_values", [False, True])
+def test_declared_rdm_equivalence_roundtrip(site_data, complex_values, tmp_path):
+    """Explicit equivalence preserves distinct block orbits, values and occupations."""
+    alpha = sym.SymmetryLabel([sym.axes.alpha()])
+    beta = sym.SymmetryLabel([sym.axes.beta()])
+    one = np.array([[0.5, 0.25], [0.25, 0.5]])
+    same = np.arange(16, dtype=float)
+    mixed = np.arange(16, dtype=float)[::-1].copy() + 2
+    if complex_values:
+        one = np.array([[0.5, 0.25j], [-0.25j, 0.5]])
+        same = same.astype(complex)
+        mixed = mixed + 1j * np.arange(16)
+    container = MPSContainer(
+        [MPSSite.from_dense(values) for values in site_data],
+        ModelOrbitals(2, sym.SymmetryProduct([sym.axes.spin(1, False)])),
+        active_one_rdm=_blocked_rdm(2, {"aa": one}, equivalent=True),
+        active_two_rdm=_blocked_rdm(4, {"aaaa": same, "aabb": mixed}, equivalent=True),
+    )
+    original = Wavefunction(container)
+    restored = [original, Wavefunction.from_json(original.to_json())]
+    path = tmp_path / "equivalent-rdms.wavefunction.h5"
+    original.to_file(path, "hdf5")
+    restored.append(Wavefunction.from_file(path, "hdf5"))
+
+    for wavefunction in restored:
+        actual = wavefunction.get_container()
+        for tensor in (actual.active_one_rdm(), actual.active_two_rdm()):
+            assert all(slot.axis(sym.AxisName.Spin).equivalent() for slot in tensor.symmetries())
+        for block in wavefunction.get_active_one_rdm_spin_dependent():
+            np.testing.assert_array_equal(block, one)
+        for labels, expected in [
+            ((alpha,) * 4, same),
+            ((beta,) * 4, same),
+            ((alpha, alpha, beta, beta), mixed),
+            ((beta, beta, alpha, alpha), mixed),
+        ]:
+            np.testing.assert_array_equal(actual.active_two_rdm().block(labels), expected)
+        np.testing.assert_array_equal(wavefunction.get_active_one_rdm_spin_traced(), 2 * one)
+        np.testing.assert_array_equal(wavefunction.get_active_two_rdm_spin_traced(), 2 * same + 2 * mixed)
+        occupations = wavefunction.active_orbital_occupations()
+        for label in (alpha, beta):
+            np.testing.assert_allclose(occupations.block([label]), [0.75, 0.25])
+
+
+def test_explicit_zero_rdm_block_is_preserved(site_data):
+    """An independent zero block is available data, even with equivalent orbitals."""
+    one = np.diag([0.8, 0.2])
+    zero = np.zeros((2, 2))
+    container = MPSContainer(
+        [MPSSite.from_dense(values) for values in site_data],
+        ModelOrbitals(2, sym.SymmetryProduct([sym.axes.spin(1, True)])),
+        active_one_rdm=_blocked_rdm(2, {"aa": one, "bb": zero}, equivalent=False),
+    )
+    alpha, beta = Wavefunction(container).get_active_one_rdm_spin_dependent()
+    np.testing.assert_array_equal(alpha, one)
+    np.testing.assert_array_equal(beta, zero)
+
+
+@pytest.mark.parametrize(
+    ("rank", "blocks", "equivalent", "raw_inputs"),
+    [
+        (2, {"aa": np.eye(2)}, False, {}),
+        (4, {"aaaa": np.zeros(16)}, True, {}),
+        (2, {"aa": np.eye(2)}, True, {"one_rdm_aa": np.eye(2), "one_rdm_bb": np.eye(2)}),
+        (
+            4,
+            {"aaaa": np.zeros(16), "aabb": np.ones(16)},
+            True,
+            {"two_rdm_aaaa": np.zeros(16), "two_rdm_aabb": np.ones(16), "two_rdm_bbbb": np.zeros(16)},
+        ),
+    ],
+)
+def test_invalid_blocked_rdm_inputs(site_data, rank, blocks, equivalent, raw_inputs):
+    """Missing independent blocks and conflicting representations are rejected."""
+    keyword = "active_one_rdm" if rank == 2 else "active_two_rdm"
+    with pytest.raises(ValueError, match="RDM"):
+        MPSContainer(
+            [MPSSite.from_dense(values) for values in site_data],
+            ModelOrbitals(2, sym.SymmetryProduct([sym.axes.spin(1, True)])),
+            **{keyword: _blocked_rdm(rank, blocks, equivalent=equivalent)},
+            **raw_inputs,
+        )
+
+
 @pytest.mark.parametrize(
     "rdms",
     [

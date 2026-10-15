@@ -150,28 +150,64 @@ For example, dense arrays can be imported without constructing symmetry blocks:
    import numpy as np
    from qdk_chemistry.data import ModelOrbitals, MPSContainer, MPSSite, Wavefunction
 
-   # (|2u> + i|u2>)/sqrt(2), with physical indices ordered as (0,u,d,2).
+   # (|20> + i|02>)/sqrt(2), with physical indices ordered as (0,u,d,2).
    first = np.zeros((1, 4, 2), dtype=complex)
    second = np.zeros((2, 4, 1), dtype=complex)
-   first[0, 3, 0], first[0, 1, 1] = 1 / np.sqrt(2), 1j / np.sqrt(2)
-   second[0, 1, 0], second[1, 3, 0] = 1, 1
-   wavefunction = Wavefunction(MPSContainer(
-       [MPSSite.from_dense(first), MPSSite.from_dense(second)], ModelOrbitals(2)
-   ))
+   first[0, 3, 0], first[0, 0, 1] = 1 / np.sqrt(2), 1j / np.sqrt(2)
+   second[0, 0, 0], second[1, 3, 0] = 1, 1
+   sites = [MPSSite.from_dense(first), MPSSite.from_dense(second)]
+   orbitals = ModelOrbitals(2)
+   wavefunction = Wavefunction(MPSContainer(sites, orbitals))
 
 Supplied RDMs describe normalized expectation values, independently of the
 scale of the stored tensors. Each 1-RDM must have shape ``(n,n)`` and each
 flattened 2-RDM must contain ``n**4`` finite entries, where ``n`` is the number
-of active sites. Supply both spin blocks of a 1-RDM or all three spin blocks
-of a 2-RDM; missing spin channels are not inferred. These structural checks
-do not establish physical consistency between the supplied RDMs and tensors.
+of active sites. Their declared index spaces, block labels and dimensions
+are validated. These structural checks do not establish physical consistency
+between the supplied RDMs and tensors.
+
+The ``active_one_rdm`` and ``active_two_rdm`` arguments accept existing real or
+complex ``SymmetryBlockedTensor`` objects. They preserve explicitly declared
+block equivalence, including through JSON/HDF5 serialization. Equivalence
+must belong to the supplied RDM itself; shared orbital coefficients or equal
+particle counts do not establish it. For example, the state above has equal
+alpha and beta 1-RDM blocks, which its producer can declare explicitly:
+
+.. code-block:: python
+
+   from qdk_chemistry.data import symmetry as sym
+
+   equivalent = sym.SymmetryProduct([sym.axes.spin(1, True)])
+   alpha = sym.SymmetryLabel([sym.axes.alpha()])
+   beta = sym.SymmetryLabel([sym.axes.beta()])
+   one_rdm = sym.SymmetryBlockedTensorRank2(
+       [equivalent, equivalent], [{alpha: 2, beta: 2}] * 2,
+       [((alpha, alpha), 0.5 * np.eye(2))],
+   )
+   wavefunction = Wavefunction(MPSContainer(
+       sites, orbitals, active_one_rdm=one_rdm
+   ))
+
+The current RDM interface supports spin-diagonal blocks. An explicit equivalent
+1-RDM needs one representative for ``aa`` and ``bb``. An equivalent 2-RDM
+still needs a supplied representative for each block orbit:
+``aaaa``/``bbbb`` and ``aabb``/``bbaa``. Declaring equivalence within either
+orbit says nothing about the other orbit. Unsupported block patterns are
+rejected. Missing independent blocks are errors, while explicitly supplied
+zero blocks are valid.
+
+The per-channel array arguments remain available: supply both 1-RDM arrays
+or all three 2-RDM arrays. Their omission never declares equivalence. Do not
+combine arrays with a blocked tensor for the same RDM rank. A traced RDM may
+be supplied on its own; it does not imply a decomposition into channels.
 
 Natural occupations are descending eigenvalues of supplied Hermitian 1-RDMs;
-they require no tensor contraction. A spin basis requires explicit alpha and
-beta blocks, which are diagonalized separately. A spin-free basis uses the
-spin-traced 1-RDM. Equal particle counts alone do not justify splitting a
-spin-traced RDM. The content hash identifies the stored state and excludes
-supplied RDM caches, so it is insufficient by itself as a cache key for
+they require no tensor contraction. A spin basis requires alpha and beta
+blocks supplied directly or through declared equivalence; the supported
+block-diagonal representation is diagonalized block by block. A spin-free
+basis uses the spin-traced 1-RDM. Equal particle counts alone do not justify
+splitting a spin-traced RDM. The content hash identifies the stored state and
+excludes supplied RDM caches, so it is insufficient by itself as a cache key for
 RDM-derived properties.
 
 Fermionic coefficient convention
