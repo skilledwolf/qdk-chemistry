@@ -166,6 +166,8 @@ Natural occupations are descending eigenvalues of supplied Hermitian 1-RDMs; the
 
 Producers may also supply single-orbital entropies and mutual information in active-orbital order. They are serialized with the container and feed entropy-based active-space selection without requiring the full two-particle RDM. Two-orbital entropies may be supplied with single-orbital entropies instead; they are stored as the mutual information they imply.
 
+The ``provenance`` argument takes a JSON object describing how the state was produced. It is stored and serialized verbatim and is not interpreted. A DMRG producer might record its name and version, the variational energy, the discarded weight of the final sweep, the bond dimensions, and the content hash of the Hamiltonian it optimized; the discarded weight in particular is needed to judge or extrapolate a truncated state.
+
 Fermionic coefficient convention
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 

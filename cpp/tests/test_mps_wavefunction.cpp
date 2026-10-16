@@ -833,6 +833,40 @@ TEST_F(MPSContainerTest, RejectsConflictingOrUnsupportedBlockedRdms) {
   EXPECT_THROW(with_blocked_rdms(unsupported), std::invalid_argument);
 }
 
+TEST_F(MPSContainerTest, ProvenanceRoundTrips) {
+  const nlohmann::json provenance{
+      {"producer", "test"},
+      {"energy", -1.25},
+      {"bond_dimensions", nlohmann::json::array({4, 8})}};
+  auto with_provenance = [&](const nlohmann::json& value) {
+    return MPSContainer(sites, orbitals, nullptr, nullptr, std::nullopt, {},
+                        std::nullopt, std::nullopt, std::nullopt, std::nullopt,
+                        std::nullopt, std::nullopt, std::nullopt, std::nullopt,
+                        std::nullopt, OrbitalEntropies{}, value);
+  };
+  const auto original = with_provenance(provenance);
+  H5::FileAccPropList access;
+  access.setCore(4096, false);
+  H5::H5File file("mps_provenance_in_memory.h5", H5F_ACC_TRUNC,
+                  H5::FileCreatPropList::DEFAULT, access);
+  original.to_hdf5(file);
+  const std::shared_ptr<const MPSContainer> json_copy =
+      MPSContainer::from_json(original.to_json());
+  const std::shared_ptr<const MPSContainer> hdf_copy =
+      MPSContainer::from_hdf5(file);
+  for (const auto* copy : {&original, json_copy.get(), hdf_copy.get()}) {
+    EXPECT_EQ(copy->provenance(), provenance);
+  }
+  const MPSContainer plain(sites, orbitals);
+  EXPECT_TRUE(plain.provenance().is_object());
+  EXPECT_TRUE(plain.provenance().empty());
+  auto without = original.to_json();
+  without.erase("provenance");
+  EXPECT_TRUE(MPSContainer::from_json(without)->provenance().empty());
+  EXPECT_THROW(with_provenance(nlohmann::json::array({1, 2})),
+               std::invalid_argument);
+}
+
 TEST_F(MPSContainerTest, RejectsInvalidStructure) {
   EXPECT_THROW(MPSContainer({}, orbitals), std::invalid_argument);
   EXPECT_THROW(MPSContainer({nullptr, sites[1]}, orbitals),

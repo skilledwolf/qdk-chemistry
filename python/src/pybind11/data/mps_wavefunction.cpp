@@ -137,7 +137,8 @@ void bind_mps_wavefunction(py::module& data) {
                        const std::optional<VectorVariant>& two_rdm_bbbb,
                        const std::optional<RdmInput<2>>& active_one_rdm,
                        const std::optional<RdmInput<4>>& active_two_rdm,
-                       const py::object& entropies) {
+                       const py::object& entropies,
+                       const py::object& provenance) {
              return std::make_unique<MPSContainer>(
                  std::move(sites), std::move(orbitals),
                  std::move(total_num_particles),
@@ -145,7 +146,12 @@ void bind_mps_wavefunction(py::module& data) {
                  std::move(site_to_orbital_order), one_rdm_spin_traced,
                  one_rdm_aa, one_rdm_bb, two_rdm_spin_traced, two_rdm_aaaa,
                  two_rdm_aabb, two_rdm_bbbb, rdm_from_python(active_one_rdm),
-                 rdm_from_python(active_two_rdm), parse_entropies(entropies));
+                 rdm_from_python(active_two_rdm), parse_entropies(entropies),
+                 provenance.is_none()
+                     ? nlohmann::json::object()
+                     : nlohmann::json::parse(py::module_::import("json")
+                                                 .attr("dumps")(provenance)
+                                                 .cast<std::string>()));
            }),
            py::arg("sites"), py::arg("orbitals"),
            py::arg("total_num_particles") = nullptr,
@@ -162,6 +168,7 @@ void bind_mps_wavefunction(py::module& data) {
            py::arg("active_one_rdm") = std::nullopt,
            py::arg("active_two_rdm") = std::nullopt,
            py::arg("entropies") = py::none(),
+           py::arg("provenance") = py::none(),
            "Store supplied sites and optional real/complex RDM arrays. RDMs "
            "and entropies use active-orbital order. Alternatively, "
            "active_one_rdm and active_two_rdm accept symmetry-blocked tensors "
@@ -170,7 +177,9 @@ void bind_mps_wavefunction(py::module& data) {
            "arrays, particle counts and orbital equivalence do not imply RDM "
            "block equivalence. Do not combine blocked and raw block inputs for "
            "the same RDM rank. ``entropies`` is a dict with optional keys "
-           "'single_orbital', 'two_orbital' and 'mutual_information'.")
+           "'single_orbital', 'two_orbital' and 'mutual_information'. "
+           "``provenance`` is a JSON-serializable dict describing how the "
+           "state was produced.")
       .def_property_readonly("sites", &MPSContainer::sites)
       .def_property_readonly("orbitals", &MPSContainer::get_orbitals)
       .def("has_total_num_particles", &MPSContainer::has_total_num_particles)
@@ -186,6 +195,13 @@ void bind_mps_wavefunction(py::module& data) {
                              &MPSContainer::site_to_orbital_order,
                              "Permutation of active-mode slots, not full "
                              "orbital indices.")
+      .def_property_readonly(
+          "provenance",
+          [](const MPSContainer& self) {
+            return py::module_::import("json").attr("loads")(
+                self.provenance().dump());
+          },
+          "A copy of the producer-supplied provenance dict.")
       .def_property_readonly("num_sites", &MPSContainer::num_sites)
       .def_property_readonly("is_complex", &MPSContainer::is_complex)
       .def_property_readonly("max_bond_dimension",

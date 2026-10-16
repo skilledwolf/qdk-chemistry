@@ -298,6 +298,20 @@ def test_invalid_supplied_rdms(site_data, rdms):
         MPSContainer([make_site(values) for values in site_data], ModelOrbitals(2), **rdms)
 
 
+def test_provenance(site_data, tmp_path):
+    """Producer provenance round-trips verbatim."""
+    sites = [make_site(values) for values in site_data]
+    provenance = {"producer": "test", "energy": -1.25, "bond_dimensions": [4, 8]}
+    original = Wavefunction(MPSContainer(sites, ModelOrbitals(2), provenance=provenance))
+    path = tmp_path / "provenance.wavefunction.h5"
+    original.to_file(path, "hdf5")
+    for wavefunction in [original, Wavefunction.from_json(original.to_json()), Wavefunction.from_file(path, "hdf5")]:
+        assert wavefunction.get_container().provenance == provenance
+    assert MPSContainer(sites, ModelOrbitals(2)).provenance == {}
+    with pytest.raises(ValueError, match="JSON object"):
+        MPSContainer(sites, ModelOrbitals(2), provenance=[1, 2])
+
+
 def test_invalid_constructor_arguments():
     """Native argument failures reach Python as ValueError."""
     label = sym.SymmetryLabel([])

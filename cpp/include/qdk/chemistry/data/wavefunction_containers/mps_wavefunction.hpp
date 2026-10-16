@@ -169,11 +169,14 @@ class MPSContainer : public WavefunctionContainer {
    * mutual information; two-orbital entropies are derived from them. Supplied
    * two-orbital entropies therefore require single-orbital entropies, and
    * missing mutual information is derived from them on construction.
+   * @param provenance JSON object describing how the state was produced, for
+   * example producer name and version, energy, discarded weight and bond
+   * dimensions. It is stored and serialized verbatim and is not interpreted.
    * @throws std::invalid_argument for null sites/basis, incompatible bonds or
    * scalar types, invalid site counts, permutations or center indices,
-   * incomplete, incorrectly sized or nonfinite RDMs, or entropies that are not
+   * incomplete, incorrectly sized or nonfinite RDMs, entropies that are not
    * finite, not sized by the active sites, or two-orbital entropies without
-   * single-orbital entropies.
+   * single-orbital entropies, or provenance that is not a JSON object.
    */
   MPSContainer(
       std::vector<SitePtr> sites, std::shared_ptr<Orbitals> orbitals,
@@ -192,7 +195,8 @@ class MPSContainer : public WavefunctionContainer {
           std::nullopt,
       const std::optional<SymmetryBlockedTensorVariant<4>>& active_two_rdm =
           std::nullopt,
-      const OrbitalEntropies& entropies = OrbitalEntropies{});
+      const OrbitalEntropies& entropies = OrbitalEntropies{},
+      nlohmann::json provenance = nlohmann::json::object());
 
   /** @brief Immutable sites in chain order. */
   const std::vector<SitePtr>& sites() const { return _sites; }
@@ -241,6 +245,11 @@ class MPSContainer : public WavefunctionContainer {
   const std::vector<std::size_t>& site_to_orbital_order() const {
     return _site_to_orbital_order;
   }
+  /**
+   * @brief Producer-supplied description of how the state was produced.
+   * @return JSON object, empty if none was supplied.
+   */
+  const nlohmann::json& provenance() const { return _provenance; }
   /** @brief Return the single default sector spanned by this container. */
   std::vector<std::string> sectors() const override;
   /**
@@ -359,6 +368,7 @@ class MPSContainer : public WavefunctionContainer {
   std::shared_ptr<const ParticleCount> _active_num_particles;
   std::optional<std::size_t> _orthogonality_center;
   std::vector<std::size_t> _site_to_orbital_order;
+  nlohmann::json _provenance;
   /** @brief Version of the MPS payload, independent of the wavefunction
    * envelope. */
   static constexpr const char* SERIALIZATION_VERSION = "0.1.0";

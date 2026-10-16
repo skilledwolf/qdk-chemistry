@@ -232,7 +232,8 @@ std::unique_ptr<MPSContainer> mps_from_metadata(
       read_counts(json.at("total_num_particles")),
       read_counts(json.at("active_num_particles")), center, std::move(order),
       std::nullopt, std::nullopt, std::nullopt, std::nullopt, std::nullopt,
-      std::nullopt, std::nullopt, std::nullopt, std::nullopt, entropies);
+      std::nullopt, std::nullopt, std::nullopt, std::nullopt, entropies,
+      json.value("provenance", nlohmann::json::object()));
 }
 
 /**
@@ -428,7 +429,7 @@ MPSContainer::MPSContainer(
     const std::optional<VectorVariant>& two_rdm_bbbb,
     const std::optional<SymmetryBlockedTensorVariant<2>>& active_one_rdm,
     const std::optional<SymmetryBlockedTensorVariant<4>>& active_two_rdm,
-    const OrbitalEntropies& entropies)
+    const OrbitalEntropies& entropies, nlohmann::json provenance)
     : WavefunctionContainer(
           one_rdm_spin_traced
               ? std::make_shared<MatrixVariant>(*one_rdm_spin_traced)
@@ -445,7 +446,11 @@ MPSContainer::MPSContainer(
       _total_num_particles(std::move(total_num_particles)),
       _active_num_particles(std::move(active_num_particles)),
       _orthogonality_center(orthogonality_center),
-      _site_to_orbital_order(std::move(site_to_orbital_order)) {
+      _site_to_orbital_order(std::move(site_to_orbital_order)),
+      _provenance(std::move(provenance)) {
+  if (!_provenance.is_object()) {
+    throw std::invalid_argument("MPS provenance must be a JSON object.");
+  }
   if (_site_to_orbital_order.empty()) {
     _site_to_orbital_order.resize(num_sites());
     std::iota(_site_to_orbital_order.begin(), _site_to_orbital_order.end(),
@@ -828,6 +833,7 @@ nlohmann::json MPSContainer::_metadata_to_json() const {
                                      ? nlohmann::json(*_orthogonality_center)
                                      : nlohmann::json(nullptr);
   json["site_to_orbital_order"] = _site_to_orbital_order;
+  json["provenance"] = _provenance;
   json["sites"] = nlohmann::json::array();
   for (const auto& site : _sites) {
     json["sites"].push_back(site_metadata(*site));
