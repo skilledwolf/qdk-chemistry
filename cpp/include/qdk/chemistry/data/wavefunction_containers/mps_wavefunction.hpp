@@ -145,8 +145,24 @@ class MPSContainer : public WavefunctionContainer {
    * @param two_rdm_aaaa Optional flattened alpha-alpha-alpha-alpha 2-RDM block.
    * @param two_rdm_aabb Optional flattened alpha-alpha-beta-beta 2-RDM block.
    * @param two_rdm_bbbb Optional flattened beta-beta-beta-beta 2-RDM block.
+   * @param active_one_rdm Optional blocked 1-RDM with explicit index spaces
+   * and block-equivalence declarations; alternative to one_rdm_aa/bb.
+   * @param active_two_rdm Optional blocked 2-RDM with explicit index spaces
+   * and block-equivalence declarations; alternative to two_rdm_aaaa/aabb/bbbb.
    * RDMs use the same conventions and real/complex storage as
    * StateVectorContainer. They are supplied data, not computed from the sites.
+   * They represent normalized expectation values, independent of tensor scale.
+   * Supply complete raw block groups, or blocked tensors whose required
+   * blocks are present or resolved by explicit equivalence declarations.
+   * Missing independent blocks are not inferred from the orbital basis or
+   * particle counts. Blocked inputs currently support the two-channel spin
+   * index spaces used by the wavefunction RDM accessors: aa/bb for rank two,
+   * aaaa/aabb/bbbb for rank four, and optionally an explicit bbaa block.
+   * Raw and blocked inputs for the same rank are mutually exclusive; a traced
+   * RDM may be supplied alongside either representation. Each 1-RDM is n by n
+   * and each flattened 2-RDM has n^4 entries, where n is the number of active
+   * sites. Dimensions and finiteness are checked; physical consistency with the
+   * tensors remains the producer's responsibility.
    * @param entropies Optional single-orbital entropies, two-orbital entropies
    * and mutual information in active-orbital order, as for
    * StateVectorContainer. Serialization stores single-orbital entropies and
@@ -154,9 +170,10 @@ class MPSContainer : public WavefunctionContainer {
    * two-orbital entropies therefore require single-orbital entropies, and
    * missing mutual information is derived from them on construction.
    * @throws std::invalid_argument for null sites/basis, incompatible bonds or
-   * scalar types, invalid site counts, permutations or center indices, or
-   * entropies that are not finite, not sized by the active sites, or
-   * two-orbital entropies without single-orbital entropies.
+   * scalar types, invalid site counts, permutations or center indices,
+   * incomplete, incorrectly sized or nonfinite RDMs, or entropies that are not
+   * finite, not sized by the active sites, or two-orbital entropies without
+   * single-orbital entropies.
    */
   MPSContainer(
       std::vector<SitePtr> sites, std::shared_ptr<Orbitals> orbitals,
@@ -171,6 +188,10 @@ class MPSContainer : public WavefunctionContainer {
       const std::optional<VectorVariant>& two_rdm_aaaa = std::nullopt,
       const std::optional<VectorVariant>& two_rdm_aabb = std::nullopt,
       const std::optional<VectorVariant>& two_rdm_bbbb = std::nullopt,
+      const std::optional<SymmetryBlockedTensorVariant<2>>& active_one_rdm =
+          std::nullopt,
+      const std::optional<SymmetryBlockedTensorVariant<4>>& active_two_rdm =
+          std::nullopt,
       const OrbitalEntropies& entropies = OrbitalEntropies{});
 
   /** @brief Immutable sites in chain order. */
@@ -253,13 +274,29 @@ class MPSContainer : public WavefunctionContainer {
    * physical basis or @p det has fewer modes than the chain has sites.
    */
   ScalarVariant get_coefficient(const Configuration& det) const override;
+  /**
+   * @brief Trace the supplied 2-RDM, honoring explicitly equivalent blocks.
+   * A stored bbaa block is used directly; otherwise the three-block convention
+   * reconstructs bbaa by exchanging the two index pairs of aabb.
+   */
+  const VectorVariant& get_active_two_rdm_spin_traced() const override;
   /** @brief Unsupported MPS norm; throws std::runtime_error. */
   double norm() const override;
-  /** @brief Unsupported total orbital occupations; throws std::runtime_error.
+  /**
+   * @brief Embed active natural occupations into the full orbital space.
+   * Inactive orbitals have unit occupation per channel and virtual orbitals
+   * have zero occupation, following StateVectorContainer conventions.
+   * @throws std::runtime_error if the required Hermitian 1-RDM is unavailable.
    */
   std::shared_ptr<const SymmetryBlockedTensor<1>> total_orbital_occupations()
       const override;
-  /** @brief Unsupported active orbital occupations; throws std::runtime_error.
+  /**
+   * @brief Descending natural occupation eigenvalues of supplied 1-RDMs.
+   * Spin bases require alpha and beta RDM blocks, either independently
+   * supplied or explicitly declared equivalent, diagonalized separately.
+   * Spin-free bases use the spin-traced RDM. Particle counts never imply a
+   * spin decomposition. Real and complex Hermitian RDMs are supported.
+   * @throws std::runtime_error if the required Hermitian 1-RDM is unavailable.
    */
   std::shared_ptr<const SymmetryBlockedTensor<1>> active_orbital_occupations()
       const override;
@@ -308,6 +345,8 @@ class MPSContainer : public WavefunctionContainer {
   /** @brief Validate site/basis counts, adjacent bonds, boundaries, and
    * ordering. */
   void _validate() const;
+  /** @brief Check all supplied RDM channels, dimensions and finiteness. */
+  void _validate_rdms() const;
   /** @brief Check supplied entropy dimensions and finiteness. */
   void _validate_entropies() const;
   /** @brief Serialize chain metadata without binary tensors, orbitals, or RDMs.

@@ -137,6 +137,33 @@ Matrix product state container
 
 :class:`~qdk_chemistry.data.MPSContainer` stores an open-boundary matrix product state supplied by an external producer. Each :class:`~qdk_chemistry.data.MPSSite` has tensor axes ``(left bond, physical state, right bond)``; its dense export is packed as a matrix with row ``left * physical_dimension + physical`` and column ``right``. Construction and serialization preserve the supplied coefficients, including their scale and complex phase; they do not normalize or canonicalize the state.
 
+Supplied RDMs describe normalized expectation values, independently of the scale of the stored tensors. Each 1-RDM must have shape ``(n,n)`` and each flattened 2-RDM must contain ``n**4`` finite entries, where ``n`` is the number of active sites. Their declared index spaces, block labels and dimensions are validated on construction and after JSON/HDF5 deserialization. These structural checks do not establish physical consistency between the supplied RDMs and tensors.
+
+The ``active_one_rdm`` and ``active_two_rdm`` arguments accept real or complex ``SymmetryBlockedTensor`` objects. They preserve explicitly declared block equivalence, including through JSON/HDF5 serialization. Equivalence must belong to the supplied RDM itself; shared orbital coefficients or equal particle counts do not establish it. For example, a producer whose two-orbital state has equal alpha and beta 1-RDM blocks can declare that explicitly when it builds the container from its ``sites``:
+
+.. code-block:: python
+
+   import numpy as np
+   from qdk_chemistry.data import ModelOrbitals, MPSContainer, Wavefunction
+   from qdk_chemistry.data import symmetry as sym
+
+   equivalent = sym.SymmetryProduct([sym.axes.spin(1, True)])
+   alpha = sym.SymmetryLabel([sym.axes.alpha()])
+   beta = sym.SymmetryLabel([sym.axes.beta()])
+   one_rdm = sym.SymmetryBlockedTensorRank2(
+       [equivalent, equivalent], [{alpha: 2, beta: 2}] * 2,
+       [((alpha, alpha), 0.5 * np.eye(2))],
+   )
+   wavefunction = Wavefunction(MPSContainer(sites, ModelOrbitals(2), active_one_rdm=one_rdm))
+
+The current RDM interface supports spin-diagonal blocks. An explicit equivalent 1-RDM needs one representative for ``aa`` and ``bb``. An equivalent 2-RDM still needs a supplied representative for each block orbit: ``aaaa``/``bbbb`` and ``aabb``/``bbaa``. Declaring equivalence within either orbit says nothing about the other orbit. Unsupported block patterns are rejected. Missing independent blocks are errors, while explicitly supplied zero blocks are valid.
+
+A four-block 2-RDM may also supply ``bbaa`` independently of ``aabb``; tracing uses each supplied block directly. Without an explicit fourth block, the existing three-block convention exchanges the index pairs of ``aabb``. Use ``active_two_rdm()`` to access all four blocks; ``get_active_two_rdm_spin_dependent()`` returns three blocks.
+
+The per-channel array arguments remain available: supply both 1-RDM arrays or all three 2-RDM arrays. Their omission never declares equivalence. Do not combine arrays with a blocked tensor for the same RDM rank. A traced RDM may be supplied on its own; it does not imply a decomposition into channels.
+
+Natural occupations are descending eigenvalues of supplied Hermitian 1-RDMs; they require no tensor contraction. A spin basis requires alpha and beta blocks supplied directly or through declared equivalence, diagonalized block by block. A spin-free basis uses the spin-traced 1-RDM. Equal particle counts alone do not justify splitting a spin-traced RDM.
+
 Producers may also supply single-orbital entropies and mutual information in active-orbital order. They are serialized with the container and feed entropy-based active-space selection without requiring the full two-particle RDM. Two-orbital entropies may be supplied with single-orbital entropies instead; they are stored as the mutual information they imply.
 
 Fermionic coefficient convention

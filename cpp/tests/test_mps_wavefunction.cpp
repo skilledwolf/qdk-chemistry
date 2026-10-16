@@ -11,10 +11,12 @@
 #include <map>
 #include <memory>
 #include <qdk/chemistry/data/wavefunction_containers/mps_wavefunction.hpp>
+#include <qdk/chemistry/data/wavefunction_containers/state_vector.hpp>
 #include <random>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -46,6 +48,19 @@ MPSContainer::SitePtr make_site(
       tensor, MPSSite::SectorOrders{{{label}, {label}, {label}}});
 }
 
+template <std::size_t Rank, typename Scalar = double>
+SymmetryBlockedTensor<Rank, Scalar> make_blocked_rdm(
+    typename SymmetryBlockedTensor<Rank, Scalar>::BlockMap blocks,
+    bool equivalent = false) {
+  using SBT = SymmetryBlockedTensor<Rank, Scalar>;
+  auto symmetry = testing::spin_symmetry(equivalent);
+  typename SBT::SymmetriesArray symmetries;
+  symmetries.fill(symmetry);
+  typename SBT::ExtentsArray extents;
+  extents.fill({{axes::alpha(), 2}, {axes::beta(), 2}});
+  return SBT(symmetries, extents, std::move(blocks));
+}
+
 class MPSContainerTest : public ::testing::Test {
  protected:
   Eigen::MatrixXd random_matrix(Eigen::Index rows, Eigen::Index cols) {
@@ -68,6 +83,15 @@ class MPSContainerTest : public ::testing::Test {
   std::unique_ptr<MPSContainer> make_container() {
     return std::make_unique<MPSContainer>(sites, orbitals, counts, counts, 1,
                                           std::vector<std::size_t>{1, 0});
+  }
+
+  MPSContainer with_blocked_rdms(
+      const std::optional<SymmetryBlockedTensorVariant<2>>& one,
+      const std::optional<SymmetryBlockedTensorVariant<4>>& two =
+          std::nullopt) {
+    return MPSContainer(sites, orbitals, nullptr, nullptr, std::nullopt, {},
+                        std::nullopt, std::nullopt, std::nullopt, std::nullopt,
+                        std::nullopt, std::nullopt, std::nullopt, one, two);
   }
 
   std::mt19937 rng{42};
@@ -375,6 +399,13 @@ TEST_F(MPSContainerTest, SuppliedRdms) {
                     H5::FileCreatPropList::DEFAULT, access);
     original.to_hdf5(file);
     std::vector<std::unique_ptr<WavefunctionContainer>> copies;
+    // Raw convenience inputs and canonical blocked inputs must preserve the
+    // same independent blocks and explicitly supplied traced companions.
+    copies.push_back(std::make_unique<MPSContainer>(
+        sites, orbitals, nullptr, nullptr, std::nullopt,
+        std::vector<std::size_t>{}, one[0], std::nullopt, std::nullopt, two[0],
+        std::nullopt, std::nullopt, std::nullopt, original.active_one_rdm(),
+        original.active_two_rdm()));
     copies.push_back(original.clone());
     copies.push_back(MPSContainer::from_json(original.to_json()));
     copies.push_back(MPSContainer::from_hdf5(file));
@@ -408,6 +439,398 @@ TEST_F(MPSContainerTest, SuppliedRdms) {
       }
     }
   }
+}
+
+TEST_F(MPSContainerTest, RejectsInvalidSuppliedRdmDimensionsAndEntries) {
+  for (int channel = 0; channel < 7; ++channel) {
+    for (bool wrong_shape : {false, true}) {
+      SCOPED_TRACE(channel);
+      SCOPED_TRACE(wrong_shape);
+      std::array<std::optional<ContainerTypes::MatrixVariant>, 3> one;
+      std::array<std::optional<ContainerTypes::VectorVariant>, 4> two;
+      for (auto& value : one) value = Eigen::MatrixXd::Identity(2, 2).eval();
+      for (auto& value : two) value = Eigen::VectorXd::Zero(16).eval();
+      if (channel < 3) {
+        Eigen::MatrixXd invalid =
+            Eigen::MatrixXd::Zero(wrong_shape ? 3 : 2, wrong_shape ? 3 : 2);
+        if (!wrong_shape)
+          invalid(0, 0) = std::numeric_limits<double>::quiet_NaN();
+        one[channel] = invalid;
+      } else {
+        Eigen::VectorXd invalid = Eigen::VectorXd::Zero(wrong_shape ? 81 : 16);
+        if (!wrong_shape) invalid(0) = std::numeric_limits<double>::infinity();
+        two[channel - 3] = invalid;
+      }
+      EXPECT_THROW(
+          MPSContainer(sites, orbitals, nullptr, nullptr, std::nullopt, {},
+                       one[0], one[1], one[2], two[0], two[1], two[2], two[3]),
+          std::invalid_argument);
+    }
+  }
+  Eigen::MatrixXcd invalid = Eigen::MatrixXcd::Identity(2, 2);
+  invalid(0, 0) = {0, std::numeric_limits<double>::infinity()};
+  EXPECT_THROW(MPSContainer(sites, orbitals, nullptr, nullptr, std::nullopt, {},
+                            ContainerTypes::MatrixVariant{invalid}),
+               std::invalid_argument);
+}
+
+TEST_F(MPSContainerTest, ValidatesRdmsAfterJsonAndHdf5Deserialization) {
+  const ContainerTypes::MatrixVariant rdm =
+      Eigen::MatrixXd::Identity(2, 2).eval();
+  MPSContainer original(sites, orbitals, nullptr, nullptr, std::nullopt, {},
+                        rdm);
+  auto json = original.to_json();
+  json["rdms"]["one_rdm_spin_traced"] = {
+      {1., 0., 0.}, {0., 1., 0.}, {0., 0., 0.}};
+  EXPECT_THROW(MPSContainer::from_json(json), std::invalid_argument);
+
+  H5::FileAccPropList access;
+  access.setCore(4096, false);
+  H5::H5File file("mps_invalid_rdms_in_memory.h5", H5F_ACC_TRUNC,
+                  H5::FileCreatPropList::DEFAULT, access);
+  original.to_hdf5(file);
+  auto dataset = file.openDataSet("rdms/one_rdm_spin_traced");
+  const std::array<double, 4> invalid{std::numeric_limits<double>::quiet_NaN(),
+                                      0., 0., 1.};
+  dataset.write(invalid.data(), H5::PredType::NATIVE_DOUBLE);
+  EXPECT_THROW(MPSContainer::from_hdf5(file), std::invalid_argument);
+
+  const ContainerTypes::VectorVariant two = Eigen::VectorXd::Zero(16).eval();
+  MPSContainer spin(sites, orbitals, nullptr, nullptr, std::nullopt, {},
+                    std::nullopt, rdm, rdm, std::nullopt, two, two, two);
+  auto malformed_two = spin.to_json();
+  auto& block = malformed_two["rdms"]["active_two_rdm"]["blocks"][0]["block"];
+  block["rows"] = 15;
+  block["data"] = std::vector<double>(15, 0.);
+  EXPECT_THROW(MPSContainer::from_json(malformed_two), std::invalid_argument);
+  auto incomplete_spin = spin.to_json();
+  incomplete_spin["rdms"]["active_one_rdm"]["blocks"].erase(0);
+  EXPECT_THROW(MPSContainer::from_json(incomplete_spin), std::invalid_argument);
+}
+
+TEST_F(MPSContainerTest, NaturalOccupationsFromSuppliedRdms) {
+  auto spin_orbitals = testing::create_test_orbitals(2, 2);
+  Eigen::MatrixXd aa(2, 2), bb(2, 2);
+  aa << .5, .3, .3, .5;
+  bb << .25, 0., 0., .75;
+  MPSContainer spin(sites, spin_orbitals, nullptr, nullptr, std::nullopt, {},
+                    std::nullopt, ContainerTypes::MatrixVariant{aa},
+                    ContainerTypes::MatrixVariant{bb});
+  const auto occupations = spin.active_orbital_occupations();
+  const Eigen::Vector2d expected_alpha(.8, .2), expected_beta(.75, .25);
+  EXPECT_TRUE(occupations->block({axes::alpha()}).isApprox(expected_alpha));
+  EXPECT_TRUE(occupations->block({axes::beta()}).isApprox(expected_beta));
+  StateVectorContainer reference(
+      ContainerTypes::VectorVariant{Eigen::VectorXd::Constant(2, 1.).eval()},
+      {Configuration::from_spin_half_string("20"),
+       Configuration::from_spin_half_string("02")},
+      spin_orbitals, std::nullopt, ContainerTypes::MatrixVariant{aa},
+      ContainerTypes::MatrixVariant{bb}, std::nullopt, std::nullopt,
+      std::nullopt, std::nullopt);
+  for (const auto& channel : {axes::alpha(), axes::beta()}) {
+    EXPECT_TRUE(occupations->block({channel}).isApprox(
+        reference.active_orbital_occupations()->block({channel})));
+  }
+  Eigen::MatrixXcd complex_aa = aa.cast<std::complex<double>>();
+  complex_aa(0, 1) = {0., .3};
+  complex_aa(1, 0) = {0., -.3};
+  const Eigen::MatrixXcd complex_bb = bb.cast<std::complex<double>>();
+  MPSContainer complex_spin(sites, spin_orbitals, nullptr, nullptr,
+                            std::nullopt, {}, std::nullopt,
+                            ContainerTypes::MatrixVariant{complex_aa},
+                            ContainerTypes::MatrixVariant{complex_bb});
+  EXPECT_TRUE(complex_spin.active_orbital_occupations()
+                  ->block({axes::alpha()})
+                  .isApprox(expected_alpha));
+  EXPECT_TRUE(complex_spin.active_orbital_occupations()
+                  ->block({axes::beta()})
+                  .isApprox(expected_beta));
+
+  Eigen::MatrixXcd traced(2, 2);
+  traced << 1., std::complex<double>(0., .6), std::complex<double>(0., -.6), 1.;
+  MPSContainer spinless(sites, orbitals, nullptr, nullptr, std::nullopt, {},
+                        ContainerTypes::MatrixVariant{traced});
+  const Eigen::Vector2d expected_traced(1.6, .4);
+  EXPECT_TRUE(spinless.active_orbital_occupations()
+                  ->block({SymmetryLabel{}})
+                  .isApprox(expected_traced));
+  EXPECT_TRUE(spinless.total_orbital_occupations()
+                  ->block({SymmetryLabel{}})
+                  .isApprox(expected_traced));
+  EXPECT_THROW(MPSContainer(sites, orbitals).active_orbital_occupations(),
+               std::runtime_error);
+  aa(0, 1) = .9;
+  MPSContainer nonhermitian(sites, orbitals, nullptr, nullptr, std::nullopt, {},
+                            ContainerTypes::MatrixVariant{aa});
+  EXPECT_THROW(nonhermitian.active_orbital_occupations(), std::runtime_error);
+}
+
+TEST_F(MPSContainerTest, TotalOccupationsEmbedActiveAndInactiveOrbitals) {
+  const auto symmetry = testing::spin_symmetry(false);
+  const std::unordered_map<SymmetryLabel, std::size_t> extents{
+      {axes::alpha(), 4}, {axes::beta(), 4}};
+  auto indices = [&](const std::vector<std::uint32_t>& selected) {
+    return std::make_shared<const SymmetryBlockedIndexSet>(
+        symmetry, extents,
+        std::unordered_map<SymmetryLabel, std::vector<std::uint32_t>>{
+            {axes::alpha(), selected}, {axes::beta(), selected}});
+  };
+  auto spin_orbitals =
+      std::make_shared<ModelOrbitals>(indices({1, 3}), indices({0}));
+  Eigen::MatrixXd aa(2, 2), bb(2, 2);
+  aa << .5, .3, .3, .5;
+  bb << .25, 0., 0., .75;
+  MPSContainer container(sites, spin_orbitals, nullptr, nullptr, std::nullopt,
+                         {}, std::nullopt, ContainerTypes::MatrixVariant{aa},
+                         ContainerTypes::MatrixVariant{bb});
+  const auto occupations = container.total_orbital_occupations();
+  const Eigen::Vector4d expected_alpha(1., .8, 0., .2);
+  const Eigen::Vector4d expected_beta(1., .75, 0., .25);
+  EXPECT_TRUE(occupations->block({axes::alpha()}).isApprox(expected_alpha));
+  EXPECT_TRUE(occupations->block({axes::beta()}).isApprox(expected_beta));
+
+  const auto trivial =
+      std::make_shared<const SymmetryProduct>(SymmetryProduct::trivial());
+  auto spinless_indices = [&](const std::vector<std::uint32_t>& selected) {
+    return std::make_shared<const SymmetryBlockedIndexSet>(
+        trivial,
+        std::unordered_map<SymmetryLabel, std::size_t>{{SymmetryLabel{}, 4}},
+        std::unordered_map<SymmetryLabel, std::vector<std::uint32_t>>{
+            {SymmetryLabel{}, selected}});
+  };
+  auto spinless_orbitals = std::make_shared<ModelOrbitals>(
+      spinless_indices({1, 3}), spinless_indices({0}));
+  MPSContainer spinless(sites, spinless_orbitals, nullptr, nullptr,
+                        std::nullopt, {}, ContainerTypes::MatrixVariant{aa});
+  EXPECT_TRUE(spinless.total_orbital_occupations()
+                  ->block({SymmetryLabel{}})
+                  .isApprox(expected_alpha));
+}
+
+TEST_F(MPSContainerTest, RejectsIncompleteSpinRdmGroups) {
+  const ContainerTypes::MatrixVariant one =
+      Eigen::MatrixXd::Identity(2, 2).eval();
+  const ContainerTypes::VectorVariant two = Eigen::VectorXd::Zero(16).eval();
+  for (bool alpha : {false, true}) {
+    EXPECT_THROW(
+        MPSContainer(sites, orbitals, nullptr, nullptr, std::nullopt, {},
+                     std::nullopt, alpha ? std::optional(one) : std::nullopt,
+                     alpha ? std::nullopt : std::optional(one)),
+        std::invalid_argument);
+  }
+  for (int mask = 1; mask < 7; ++mask) {
+    EXPECT_THROW(
+        MPSContainer(sites, orbitals, nullptr, nullptr, std::nullopt, {},
+                     std::nullopt, std::nullopt, std::nullopt, std::nullopt,
+                     mask & 1 ? std::optional(two) : std::nullopt,
+                     mask & 2 ? std::optional(two) : std::nullopt,
+                     mask & 4 ? std::optional(two) : std::nullopt),
+        std::invalid_argument);
+  }
+}
+
+TEST_F(MPSContainerTest, ExplicitRdmEquivalenceSurvivesCopiesAndSerialization) {
+  orbitals = testing::create_test_orbitals(2, 2);
+  auto check = [&]<typename Scalar>() {
+    using Matrix = Tensor<2, Scalar>;
+    using Vector = Tensor<4, Scalar>;
+    Matrix one = Matrix::Identity(2, 2) * Scalar(0.5);
+    if constexpr (std::is_same_v<Scalar, double>) {
+      one(0, 1) = one(1, 0) = 0.25;
+    } else {
+      one(0, 1) = Scalar(0, 0.25);
+      one(1, 0) = Scalar(0, -0.25);
+    }
+    auto one_ptr = std::make_shared<const Matrix>(one);
+    auto zero = std::make_shared<const Vector>(Vector::Zero(16));
+    const Vector mixed = Eigen::VectorXd::LinSpaced(16, 0., 0.3).cast<Scalar>();
+    auto mixed_ptr = std::make_shared<const Vector>(mixed);
+    const auto one_rdm = make_blocked_rdm<2, Scalar>(
+        {{{axes::alpha(), axes::alpha()}, one_ptr}}, true);
+    const auto two_rdm = make_blocked_rdm<4, Scalar>(
+        {{{axes::alpha(), axes::alpha(), axes::alpha(), axes::alpha()}, zero},
+         {{axes::alpha(), axes::alpha(), axes::beta(), axes::beta()},
+          mixed_ptr}},
+        true);
+    auto original = with_blocked_rdms(one_rdm, two_rdm);
+    H5::FileAccPropList access;
+    access.setCore(4096, false);
+    H5::H5File file("mps_equivalent_rdms_in_memory.h5", H5F_ACC_TRUNC,
+                    H5::FileCreatPropList::DEFAULT, access);
+    original.to_hdf5(file);
+    std::vector<std::unique_ptr<WavefunctionContainer>> copies;
+    copies.push_back(original.clone());
+    copies.push_back(MPSContainer::from_json(original.to_json()));
+    copies.push_back(MPSContainer::from_hdf5(file));
+    for (const auto& copy : copies) {
+      const auto& restored_one =
+          std::get<SymmetryBlockedTensor<2, Scalar>>(copy->active_one_rdm());
+      const auto& restored_two =
+          std::get<SymmetryBlockedTensor<4, Scalar>>(copy->active_two_rdm());
+      EXPECT_TRUE(
+          restored_one.symmetries()[0]->axis(AxisName::Spin).equivalent());
+      EXPECT_TRUE(
+          restored_two.symmetries()[0]->axis(AxisName::Spin).equivalent());
+      EXPECT_EQ(restored_one.block_ptr({axes::alpha(), axes::alpha()}),
+                restored_one.block_ptr({axes::beta(), axes::beta()}));
+      EXPECT_EQ(restored_two.block_ptr(
+                    {axes::alpha(), axes::alpha(), axes::beta(), axes::beta()}),
+                restored_two.block_ptr({axes::beta(), axes::beta(),
+                                        axes::alpha(), axes::alpha()}));
+      EXPECT_TRUE(
+          restored_two
+              .block({axes::beta(), axes::beta(), axes::beta(), axes::beta()})
+              .isZero());
+      EXPECT_TRUE(std::get<Matrix>(copy->get_active_one_rdm_spin_traced())
+                      .isApprox(2 * one));
+      // The deliberately asymmetric mixed block distinguishes a declared
+      // bbaa alias from the index-pair transpose used for three raw blocks.
+      EXPECT_TRUE(std::get<Vector>(copy->get_active_two_rdm_spin_traced())
+                      .isApprox(2 * mixed));
+      const Eigen::Vector2d expected(0.75, 0.25);
+      const auto occupations = copy->active_orbital_occupations();
+      EXPECT_TRUE(occupations->block({axes::alpha()}).isApprox(expected));
+      EXPECT_TRUE(occupations->block({axes::beta()}).isApprox(expected));
+    }
+  };
+  check.template operator()<double>();
+  check.template operator()<std::complex<double>>();
+}
+
+TEST_F(MPSContainerTest, BlockedRdmsRequireIndependentRepresentatives) {
+  orbitals = testing::create_test_orbitals(2, 2);
+  ASSERT_TRUE(orbitals->is_restricted());
+  auto one =
+      std::make_shared<const Eigen::MatrixXd>(Eigen::MatrixXd::Identity(2, 2));
+  const auto incomplete_one =
+      make_blocked_rdm<2>({{{axes::alpha(), axes::alpha()}, one}});
+  EXPECT_THROW(with_blocked_rdms(incomplete_one), std::invalid_argument);
+  const auto declared_one =
+      make_blocked_rdm<2>({{{axes::alpha(), axes::alpha()}, one}}, true);
+  EXPECT_NO_THROW(with_blocked_rdms(declared_one));
+
+  auto zero =
+      std::make_shared<const Eigen::VectorXd>(Eigen::VectorXd::Zero(16));
+  const auto incomplete_two = make_blocked_rdm<4>(
+      {{{axes::alpha(), axes::alpha(), axes::alpha(), axes::alpha()}, zero}},
+      true);
+  EXPECT_THROW(with_blocked_rdms(declared_one, incomplete_two),
+               std::invalid_argument);
+  const auto declared_two = make_blocked_rdm<4>(
+      {{{axes::alpha(), axes::alpha(), axes::alpha(), axes::alpha()}, zero},
+       {{axes::alpha(), axes::alpha(), axes::beta(), axes::beta()}, zero}},
+      true);
+  auto complete = with_blocked_rdms(declared_one, declared_two);
+  auto invalid = complete.to_json();
+  invalid["rdms"]["active_two_rdm"] = incomplete_two.to_json();
+  EXPECT_THROW(MPSContainer::from_json(invalid), std::invalid_argument);
+  H5::FileAccPropList access;
+  access.setCore(4096, false);
+  H5::H5File file("mps_missing_block_in_memory.h5", H5F_ACC_TRUNC,
+                  H5::FileCreatPropList::DEFAULT, access);
+  complete.to_hdf5(file);
+  ASSERT_GE(H5Ldelete(file.getId(), "rdms/active_two_rdm", H5P_DEFAULT), 0);
+  auto group = file.createGroup("rdms/active_two_rdm");
+  const hbool_t complex = false;
+  group
+      .createAttribute("is_complex", H5::PredType::NATIVE_HBOOL,
+                       H5::DataSpace(H5S_SCALAR))
+      .write(H5::PredType::NATIVE_HBOOL, &complex);
+  incomplete_two.to_hdf5(group);
+  EXPECT_THROW(MPSContainer::from_hdf5(file), std::invalid_argument);
+}
+
+TEST_F(MPSContainerTest, IndependentFourthRdmBlockSurvivesSerialization) {
+  auto check = [&]<typename Scalar>() {
+    using Vector = Tensor<4, Scalar>;
+    using SBT = SymmetryBlockedTensor<4, Scalar>;
+    const typename SBT::Labels aaaa{axes::alpha(), axes::alpha(), axes::alpha(),
+                                    axes::alpha()};
+    const typename SBT::Labels aabb{axes::alpha(), axes::alpha(), axes::beta(),
+                                    axes::beta()};
+    const typename SBT::Labels bbaa{axes::beta(), axes::beta(), axes::alpha(),
+                                    axes::alpha()};
+    const typename SBT::Labels bbbb{axes::beta(), axes::beta(), axes::beta(),
+                                    axes::beta()};
+    const Vector same = Vector::Constant(16, Scalar(0.25));
+    const Vector mixed = Eigen::VectorXd::LinSpaced(16, 0., 0.3).cast<Scalar>();
+    Vector fourth = Eigen::VectorXd::LinSpaced(16, 0.4, 0.8).cast<Scalar>();
+    if constexpr (!std::is_same_v<Scalar, double>) {
+      fourth *= Scalar(1., 0.5);
+    }
+    const auto tensor = make_blocked_rdm<4, Scalar>(
+        {{aaaa, std::make_shared<const Vector>(same)},
+         {aabb, std::make_shared<const Vector>(mixed)},
+         {bbaa, std::make_shared<const Vector>(fourth)},
+         {bbbb, std::make_shared<const Vector>(same)}});
+    auto original = with_blocked_rdms(std::nullopt, tensor);
+    H5::FileAccPropList access;
+    access.setCore(4096, false);
+    H5::H5File file("mps_four_rdm_blocks_in_memory.h5", H5F_ACC_TRUNC,
+                    H5::FileCreatPropList::DEFAULT, access);
+    original.to_hdf5(file);
+    std::vector<std::unique_ptr<WavefunctionContainer>> copies;
+    copies.push_back(original.clone());
+    copies.push_back(MPSContainer::from_json(original.to_json()));
+    copies.push_back(MPSContainer::from_hdf5(file));
+    for (const auto& copy : copies) {
+      const auto& restored = std::get<SBT>(copy->active_two_rdm());
+      EXPECT_FALSE(restored.symmetries()[0]->axis(AxisName::Spin).equivalent());
+      EXPECT_NE(restored.block_ptr(aabb), restored.block_ptr(bbaa));
+      EXPECT_TRUE(restored.block(bbaa).isApprox(fourth));
+      // Synthetic data distinguishes explicit storage from both an alias and
+      // the pair-transpose convention used when only three blocks are supplied.
+      EXPECT_TRUE(std::get<Vector>(copy->get_active_two_rdm_spin_traced())
+                      .isApprox(2 * same + mixed + fourth));
+    }
+  };
+  check.template operator()<double>();
+  check.template operator()<std::complex<double>>();
+}
+
+TEST_F(MPSContainerTest, RejectsConflictingOrUnsupportedBlockedRdms) {
+  auto one =
+      std::make_shared<const Eigen::MatrixXd>(Eigen::MatrixXd::Identity(2, 2));
+  const auto declared_one =
+      make_blocked_rdm<2>({{{axes::alpha(), axes::alpha()}, one}}, true);
+  auto zero =
+      std::make_shared<const Eigen::VectorXd>(Eigen::VectorXd::Zero(16));
+  const auto declared_two = make_blocked_rdm<4>(
+      {{{axes::alpha(), axes::alpha(), axes::alpha(), axes::alpha()}, zero},
+       {{axes::alpha(), axes::alpha(), axes::beta(), axes::beta()}, zero}},
+      true);
+  EXPECT_THROW(
+      MPSContainer(sites, orbitals, nullptr, nullptr, std::nullopt, {},
+                   std::nullopt, ContainerTypes::MatrixVariant{*one},
+                   ContainerTypes::MatrixVariant{*one}, std::nullopt,
+                   std::nullopt, std::nullopt, std::nullopt, declared_one),
+      std::invalid_argument);
+  EXPECT_THROW(MPSContainer(sites, orbitals, nullptr, nullptr, std::nullopt, {},
+                            std::nullopt, std::nullopt, std::nullopt,
+                            std::nullopt, ContainerTypes::VectorVariant{*zero},
+                            ContainerTypes::VectorVariant{*zero},
+                            ContainerTypes::VectorVariant{*zero}, std::nullopt,
+                            declared_two),
+               std::invalid_argument);
+  const auto coherences =
+      make_blocked_rdm<2>({{{axes::alpha(), axes::alpha()}, one},
+                           {{axes::beta(), axes::beta()}, one},
+                           {{axes::alpha(), axes::beta()}, one}});
+  EXPECT_THROW(with_blocked_rdms(coherences), std::invalid_argument);
+  const auto unsupported_two = make_blocked_rdm<4>(
+      {{{axes::alpha(), axes::alpha(), axes::alpha(), axes::alpha()}, zero},
+       {{axes::alpha(), axes::alpha(), axes::beta(), axes::beta()}, zero},
+       {{axes::beta(), axes::beta(), axes::beta(), axes::beta()}, zero},
+       {{axes::alpha(), axes::beta(), axes::alpha(), axes::beta()},
+        std::make_shared<const Eigen::VectorXd>(*zero)}});
+  EXPECT_THROW(with_blocked_rdms(std::nullopt, unsupported_two),
+               std::invalid_argument);
+  auto trivial =
+      std::make_shared<const SymmetryProduct>(SymmetryProduct::trivial());
+  const SymmetryBlockedTensor<2> unsupported(
+      {trivial, trivial}, {{{{SymmetryLabel{}, 2}}, {{SymmetryLabel{}, 2}}}},
+      {{{SymmetryLabel{}, SymmetryLabel{}}, one}});
+  EXPECT_THROW(with_blocked_rdms(unsupported), std::invalid_argument);
 }
 
 TEST_F(MPSContainerTest, RejectsInvalidStructure) {
@@ -446,6 +869,8 @@ TEST_F(MPSContainerTest, EqualSpinCountsDoNotImplyClosedShellRdms) {
   EXPECT_TRUE(traced_only.has_one_rdm_spin_traced());
   EXPECT_FALSE(traced_only.has_one_rdm_spin_dependent());
   EXPECT_THROW(traced_only.active_one_rdm(), std::runtime_error);
+  EXPECT_THROW(traced_only.active_orbital_occupations(), std::runtime_error);
+  EXPECT_THROW(traced_only.total_orbital_occupations(), std::runtime_error);
   Eigen::MatrixXd aa = random_matrix(2, 2), bb = random_matrix(2, 2);
   Eigen::VectorXd aaaa = random_matrix(16, 1), aabb = random_matrix(16, 1),
                   bbbb = random_matrix(16, 1);
@@ -735,10 +1160,10 @@ TEST_F(MPSContainerTest, SuppliedEntropiesRoundTrip) {
   OrbitalEntropies entropies;
   entropies.single_orbital = single;
   entropies.mutual_information = mutual;
-  const MPSContainer original(sites, orbitals, nullptr, nullptr, std::nullopt,
-                              {}, std::nullopt, std::nullopt, std::nullopt,
-                              std::nullopt, std::nullopt, std::nullopt,
-                              std::nullopt, entropies);
+  const MPSContainer original(
+      sites, orbitals, nullptr, nullptr, std::nullopt, {}, std::nullopt,
+      std::nullopt, std::nullopt, std::nullopt, std::nullopt, std::nullopt,
+      std::nullopt, std::nullopt, std::nullopt, entropies);
   H5::FileAccPropList access;
   access.setCore(4096, false);
   H5::H5File file("mps_entropies_in_memory.h5", H5F_ACC_TRUNC,
@@ -765,10 +1190,10 @@ TEST_F(MPSContainerTest, SuppliedEntropiesRoundTrip) {
   OrbitalEntropies two_orbital;
   two_orbital.single_orbital = single;
   two_orbital.two_orbital = pair;
-  const MPSContainer from_pairs(sites, orbitals, nullptr, nullptr, std::nullopt,
-                                {}, std::nullopt, std::nullopt, std::nullopt,
-                                std::nullopt, std::nullopt, std::nullopt,
-                                std::nullopt, two_orbital);
+  const MPSContainer from_pairs(
+      sites, orbitals, nullptr, nullptr, std::nullopt, {}, std::nullopt,
+      std::nullopt, std::nullopt, std::nullopt, std::nullopt, std::nullopt,
+      std::nullopt, std::nullopt, std::nullopt, two_orbital);
   const auto restored_pairs = MPSContainer::from_json(from_pairs.to_json());
   EXPECT_TRUE(restored_pairs->get_mutual_information().isApprox(mutual));
   EXPECT_TRUE(restored_pairs->get_two_orbital_entropies().isApprox(pair));
@@ -776,7 +1201,8 @@ TEST_F(MPSContainerTest, SuppliedEntropiesRoundTrip) {
   EXPECT_THROW(
       MPSContainer(sites, orbitals, nullptr, nullptr, std::nullopt, {},
                    std::nullopt, std::nullopt, std::nullopt, std::nullopt,
-                   std::nullopt, std::nullopt, std::nullopt, two_orbital),
+                   std::nullopt, std::nullopt, std::nullopt, std::nullopt,
+                   std::nullopt, two_orbital),
       std::invalid_argument);
 
   OrbitalEntropies wrong_size;
@@ -784,7 +1210,8 @@ TEST_F(MPSContainerTest, SuppliedEntropiesRoundTrip) {
   EXPECT_THROW(
       MPSContainer(sites, orbitals, nullptr, nullptr, std::nullopt, {},
                    std::nullopt, std::nullopt, std::nullopt, std::nullopt,
-                   std::nullopt, std::nullopt, std::nullopt, wrong_size),
+                   std::nullopt, std::nullopt, std::nullopt, std::nullopt,
+                   std::nullopt, wrong_size),
       std::invalid_argument);
   OrbitalEntropies nonfinite;
   nonfinite.mutual_information =
@@ -792,6 +1219,7 @@ TEST_F(MPSContainerTest, SuppliedEntropiesRoundTrip) {
   EXPECT_THROW(
       MPSContainer(sites, orbitals, nullptr, nullptr, std::nullopt, {},
                    std::nullopt, std::nullopt, std::nullopt, std::nullopt,
-                   std::nullopt, std::nullopt, std::nullopt, nonfinite),
+                   std::nullopt, std::nullopt, std::nullopt, std::nullopt,
+                   std::nullopt, nonfinite),
       std::invalid_argument);
 }

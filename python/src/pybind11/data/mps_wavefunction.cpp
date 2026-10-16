@@ -28,6 +28,24 @@ OrbitalEntropies parse_entropies(const py::object& obj);
 
 namespace {
 
+template <std::size_t Rank>
+using RdmInput = std::variant<
+    std::shared_ptr<const SymmetryBlockedTensor<Rank, double>>,
+    std::shared_ptr<const SymmetryBlockedTensor<Rank, std::complex<double>>>>;
+
+template <std::size_t Rank>
+std::optional<SymmetryBlockedTensorVariant<Rank>> rdm_from_python(
+    const std::optional<RdmInput<Rank>>& value) {
+  if (!value) return std::nullopt;
+  return std::visit(
+      [](const auto& tensor)
+          -> std::optional<SymmetryBlockedTensorVariant<Rank>> {
+        if (!tensor) return std::nullopt;
+        return *tensor;
+      },
+      *value);
+}
+
 template <typename Scalar>
 std::shared_ptr<MPSSite> site_from_tensor(
     std::shared_ptr<const SymmetryBlockedTensor<3, Scalar>> tensor,
@@ -117,6 +135,8 @@ void bind_mps_wavefunction(py::module& data) {
                        const std::optional<VectorVariant>& two_rdm_aaaa,
                        const std::optional<VectorVariant>& two_rdm_aabb,
                        const std::optional<VectorVariant>& two_rdm_bbbb,
+                       const std::optional<RdmInput<2>>& active_one_rdm,
+                       const std::optional<RdmInput<4>>& active_two_rdm,
                        const py::object& entropies) {
              return std::make_unique<MPSContainer>(
                  std::move(sites), std::move(orbitals),
@@ -124,7 +144,8 @@ void bind_mps_wavefunction(py::module& data) {
                  std::move(active_num_particles), orthogonality_center,
                  std::move(site_to_orbital_order), one_rdm_spin_traced,
                  one_rdm_aa, one_rdm_bb, two_rdm_spin_traced, two_rdm_aaaa,
-                 two_rdm_aabb, two_rdm_bbbb, parse_entropies(entropies));
+                 two_rdm_aabb, two_rdm_bbbb, rdm_from_python(active_one_rdm),
+                 rdm_from_python(active_two_rdm), parse_entropies(entropies));
            }),
            py::arg("sites"), py::arg("orbitals"),
            py::arg("total_num_particles") = nullptr,
@@ -138,11 +159,18 @@ void bind_mps_wavefunction(py::module& data) {
            py::arg("two_rdm_aaaa") = std::nullopt,
            py::arg("two_rdm_aabb") = std::nullopt,
            py::arg("two_rdm_bbbb") = std::nullopt,
+           py::arg("active_one_rdm") = std::nullopt,
+           py::arg("active_two_rdm") = std::nullopt,
            py::arg("entropies") = py::none(),
            "Store supplied sites and optional real/complex RDM arrays. RDMs "
-           "and entropies use active-orbital order. ``entropies`` is a dict "
-           "with optional keys 'single_orbital', 'two_orbital' and "
-           "'mutual_information'.")
+           "and entropies use active-orbital order. Alternatively, "
+           "active_one_rdm and active_two_rdm accept symmetry-blocked tensors "
+           "in the supported spin-diagonal layout. Block equivalence must be "
+           "explicitly declared by the tensor symmetry metadata; missing "
+           "arrays, particle counts and orbital equivalence do not imply RDM "
+           "block equivalence. Do not combine blocked and raw block inputs for "
+           "the same RDM rank. ``entropies`` is a dict with optional keys "
+           "'single_orbital', 'two_orbital' and 'mutual_information'.")
       .def_property_readonly("sites", &MPSContainer::sites)
       .def_property_readonly("orbitals", &MPSContainer::get_orbitals)
       .def("has_total_num_particles", &MPSContainer::has_total_num_particles)
