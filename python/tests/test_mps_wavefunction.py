@@ -312,6 +312,40 @@ def test_provenance(site_data, tmp_path):
         MPSContainer(sites, ModelOrbitals(2), provenance=[1, 2])
 
 
+def test_supplied_properties_define_content_hash(site_data):
+    """Supplied RDMs and entropies change the hash; getters that fill derived caches do not."""
+    sites = [make_site(values) for values in site_data]
+    plain = Wavefunction(MPSContainer(sites, ModelOrbitals(2)))
+    supplied = Wavefunction(MPSContainer(sites, ModelOrbitals(2), one_rdm_spin_traced=np.eye(2)))
+    other = Wavefunction(MPSContainer(sites, ModelOrbitals(2), one_rdm_spin_traced=2 * np.eye(2)))
+    entropies = Wavefunction(MPSContainer(sites, ModelOrbitals(2), entropies={"single_orbital": np.array([0.3, 0.7])}))
+    provenance = Wavefunction(MPSContainer(sites, ModelOrbitals(2), provenance={"producer": "test"}))
+    assert Wavefunction.from_json(provenance.to_json()).content_hash() == provenance.content_hash()
+    hashes = [wavefunction.content_hash() for wavefunction in (plain, supplied, other, entropies, provenance)]
+    assert len(set(hashes)) == len(hashes)
+
+    one = 0.5 * np.eye(2)
+    mixed = np.zeros(16)
+    mixed[[0, 3, 12, 15]] = 0.5
+    blocked = Wavefunction(
+        MPSContainer(
+            sites,
+            ModelOrbitals(2, sym.SymmetryProduct([sym.axes.spin(1, False)])),
+            one_rdm_aa=one,
+            one_rdm_bb=one,
+            two_rdm_aaaa=np.zeros(16),
+            two_rdm_aabb=mixed,
+            two_rdm_bbbb=np.zeros(16),
+        )
+    )
+    untouched = blocked.content_hash()
+    blocked.get_active_one_rdm_spin_traced()
+    blocked.get_active_two_rdm_spin_traced()
+    np.testing.assert_allclose(blocked.get_single_orbital_entropies(), np.log(2))
+    assert blocked.content_hash() == untouched
+    assert Wavefunction.from_json(blocked.to_json()).content_hash() == untouched
+
+
 def test_invalid_constructor_arguments():
     """Native argument failures reach Python as ValueError."""
     label = sym.SymmetryLabel([])

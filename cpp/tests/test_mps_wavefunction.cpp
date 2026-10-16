@@ -6,6 +6,7 @@
 #include <gtest/gtest.h>
 
 #include <array>
+#include <cmath>
 #include <complex>
 #include <limits>
 #include <map>
@@ -13,6 +14,7 @@
 #include <qdk/chemistry/data/wavefunction_containers/mps_wavefunction.hpp>
 #include <qdk/chemistry/data/wavefunction_containers/state_vector.hpp>
 #include <random>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
@@ -865,6 +867,124 @@ TEST_F(MPSContainerTest, ProvenanceRoundTrips) {
   EXPECT_TRUE(MPSContainer::from_json(without)->provenance().empty());
   EXPECT_THROW(with_provenance(nlohmann::json::array({1, 2})),
                std::invalid_argument);
+}
+
+TEST_F(MPSContainerTest, SuppliedPropertiesDefineContentHash) {
+  auto hash = [](const MPSContainer& container) {
+    return Wavefunction(container.clone()).content_hash();
+  };
+  const ContainerTypes::MatrixVariant rdm =
+      Eigen::MatrixXd::Identity(2, 2).eval();
+  const ContainerTypes::MatrixVariant other_rdm =
+      (2 * Eigen::MatrixXd::Identity(2, 2)).eval();
+  const ContainerTypes::VectorVariant two_rdm =
+      Eigen::VectorXd::Zero(16).eval();
+  OrbitalEntropies single, other_single, mutual;
+  single.single_orbital = Eigen::Vector2d(0.3, 0.7);
+  other_single.single_orbital = Eigen::Vector2d(0.3, 0.6);
+  mutual = single;
+  mutual.mutual_information = Eigen::Matrix2d{{0., 0.2}, {0.2, 0.}};
+  auto with_entropies = [&](const OrbitalEntropies& entropies) {
+    return MPSContainer(sites, orbitals, nullptr, nullptr, std::nullopt, {},
+                        std::nullopt, std::nullopt, std::nullopt, std::nullopt,
+                        std::nullopt, std::nullopt, std::nullopt, std::nullopt,
+                        std::nullopt, entropies);
+  };
+  const MPSContainer with_provenance(
+      sites, orbitals, nullptr, nullptr, std::nullopt, {}, std::nullopt,
+      std::nullopt, std::nullopt, std::nullopt, std::nullopt, std::nullopt,
+      std::nullopt, std::nullopt, std::nullopt, OrbitalEntropies{},
+      nlohmann::json{{"producer", "test"}});
+  EXPECT_EQ(hash(*MPSContainer::from_json(with_provenance.to_json())),
+            hash(with_provenance));
+  const std::vector<std::string> hashes{
+      hash(MPSContainer(sites, orbitals)),
+      hash(MPSContainer(sites, orbitals, nullptr, nullptr, std::nullopt, {},
+                        rdm)),
+      hash(MPSContainer(sites, orbitals, nullptr, nullptr, std::nullopt, {},
+                        other_rdm)),
+      hash(MPSContainer(sites, orbitals, nullptr, nullptr, std::nullopt, {},
+                        std::nullopt, std::nullopt, std::nullopt, two_rdm)),
+      hash(with_entropies(single)),
+      hash(with_entropies(other_single)),
+      hash(with_entropies(mutual)),
+      hash(with_provenance)};
+  EXPECT_EQ(std::set<std::string>(hashes.begin(), hashes.end()).size(),
+            hashes.size());
+}
+
+TEST_F(MPSContainerTest, ContentHashIgnoresLazilyDerivedProperties) {
+  orbitals = testing::create_test_orbitals(2, 2);
+  // RDMs of (|20> + |02>)/sqrt(2), whose single-orbital entropies are finite.
+  const Eigen::MatrixXd one = 0.5 * Eigen::MatrixXd::Identity(2, 2);
+  const Eigen::VectorXd same = Eigen::VectorXd::Zero(16);
+  Eigen::VectorXd mixed = Eigen::VectorXd::Zero(16);
+  for (const Eigen::Index index : {0, 3, 12, 15}) mixed(index) = 0.5;
+  OrbitalEntropies entropies;
+  entropies.mutual_information = Eigen::Matrix2d{{0., 0.5}, {0.5, 0.}};
+  auto one_ptr = std::make_shared<const Eigen::MatrixXd>(one);
+  auto same_ptr = std::make_shared<const Eigen::VectorXd>(same);
+  auto mixed_ptr = std::make_shared<const Eigen::VectorXd>(mixed);
+  using Labels = SymmetryBlockedTensor<4>::Labels;
+  const Labels aaaa{axes::alpha(), axes::alpha(), axes::alpha(), axes::alpha()};
+  const Labels aabb{axes::alpha(), axes::alpha(), axes::beta(), axes::beta()};
+  const Labels bbaa{axes::beta(), axes::beta(), axes::alpha(), axes::alpha()};
+  const Labels bbbb{axes::beta(), axes::beta(), axes::beta(), axes::beta()};
+  auto blocked = [&](const SymmetryBlockedTensorVariant<2>& one_rdm,
+                     const SymmetryBlockedTensorVariant<4>& two_rdm) {
+    return MPSContainer(sites, orbitals, nullptr, nullptr, std::nullopt, {},
+                        std::nullopt, std::nullopt, std::nullopt, std::nullopt,
+                        std::nullopt, std::nullopt, std::nullopt, one_rdm,
+                        two_rdm, entropies);
+  };
+  const std::vector<std::pair<std::string, MPSContainer>> cases{
+      {"three raw blocks",
+       MPSContainer(sites, orbitals, nullptr, nullptr, std::nullopt, {},
+                    std::nullopt, ContainerTypes::MatrixVariant{one},
+                    ContainerTypes::MatrixVariant{one}, std::nullopt,
+                    ContainerTypes::VectorVariant{same},
+                    ContainerTypes::VectorVariant{mixed},
+                    ContainerTypes::VectorVariant{same}, std::nullopt,
+                    std::nullopt, entropies)},
+      {"four blocks",
+       blocked(make_blocked_rdm<2>({{{axes::alpha(), axes::alpha()}, one_ptr},
+                                    {{axes::beta(), axes::beta()}, one_ptr}}),
+               make_blocked_rdm<4>({{aaaa, same_ptr},
+                                    {aabb, mixed_ptr},
+                                    {bbaa, mixed_ptr},
+                                    {bbbb, same_ptr}}))},
+      {"declared equivalence",
+       blocked(
+           make_blocked_rdm<2>({{{axes::alpha(), axes::alpha()}, one_ptr}},
+                               true),
+           make_blocked_rdm<4>({{aaaa, same_ptr}, {aabb, mixed_ptr}}, true))}};
+  for (const auto& [name, container] : cases) {
+    SCOPED_TRACE(name);
+    const auto untouched = Wavefunction(container.clone()).content_hash();
+    auto used = container.clone();
+    used->get_active_one_rdm_spin_traced();
+    used->get_active_two_rdm_spin_traced();
+    used->active_orbital_occupations();
+    used->total_orbital_occupations();
+    EXPECT_NEAR(used->get_single_orbital_entropies()(0), std::log(2.), 1e-12);
+    used->get_two_orbital_entropies();
+    used->get_mutual_information();
+    const auto json = used->to_json();
+    // The getters filled caches that serialization now writes.
+    ASSERT_TRUE(json.at("rdms").contains("one_rdm_spin_traced"));
+    ASSERT_TRUE(json.at("rdms").contains("two_rdm_spin_traced"));
+    ASSERT_TRUE(json.contains("single_orbital_entropies"));
+    H5::FileAccPropList access;
+    access.setCore(4096, false);
+    H5::H5File file("mps_hash_caches_in_memory.h5", H5F_ACC_TRUNC,
+                    H5::FileCreatPropList::DEFAULT, access);
+    used->to_hdf5(file);
+    EXPECT_EQ(Wavefunction(MPSContainer::from_json(json)).content_hash(),
+              untouched);
+    EXPECT_EQ(Wavefunction(MPSContainer::from_hdf5(file)).content_hash(),
+              untouched);
+    EXPECT_EQ(Wavefunction(std::move(used)).content_hash(), untouched);
+  }
 }
 
 TEST_F(MPSContainerTest, RejectsInvalidStructure) {

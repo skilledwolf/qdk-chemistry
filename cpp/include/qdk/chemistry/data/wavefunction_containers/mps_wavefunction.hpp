@@ -339,7 +339,15 @@ class MPSContainer : public WavefunctionContainer {
 
  protected:
   /**
-   * @brief Hash defining tensor data and metadata, excluding cached RDMs.
+   * @brief Hash tensor data, metadata, and supplied RDMs and entropies.
+   *
+   * Supplied RDMs and entropies are defining data: they cannot be regenerated
+   * from the sites, so clear_caches() keeps them. Values that getters derive
+   * lazily are excluded so the hash does not depend on which getters ran: a
+   * traced RDM is hashed only without its blocked RDM, single-orbital
+   * entropies only without both blocked RDMs, and two-orbital entropies never.
+   * Such supplied values must be consistent with the data they derive from.
+   * Provenance is hashed like other supplied data.
    * @param ctx Content-hash context to update.
    */
   void hash_update(qdk::chemistry::utils::HashContext& ctx) const override;

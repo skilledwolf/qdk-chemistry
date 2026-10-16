@@ -976,6 +976,17 @@ void MPSContainer::hash_update(qdk::chemistry::utils::HashContext& ctx) const {
     }
     hash_value(ctx, site->physical_basis());
   }
+  // Getters fill traced RDMs from blocked RDMs, single-orbital entropies from
+  // both blocked RDMs, and two-orbital entropies from mutual information.
+  hash_value(ctx, _active_one_rdm);
+  if (!_active_one_rdm) hash_value(ctx, _one_rdm_spin_traced);
+  hash_value(ctx, _active_two_rdm);
+  if (!_active_two_rdm) hash_value(ctx, _two_rdm_spin_traced);
+  if (!_active_one_rdm || !_active_two_rdm) {
+    hash_value(ctx, _entropies.single_orbital);
+  }
+  hash_value(ctx, _entropies.mutual_information);
+  hash_value(ctx, _provenance.dump());
 }
 
 std::unique_ptr<WavefunctionContainer> MPSContainer::clone() const {

@@ -168,6 +168,8 @@ Producers may also supply single-orbital entropies and mutual information in act
 
 The ``provenance`` argument takes a JSON object describing how the state was produced. It is stored and serialized verbatim and is not interpreted. A DMRG producer might record its name and version, the variational energy, the discarded weight of the final sweep, the bond dimensions, and the content hash of the Hamiltonian it optimized; the discarded weight in particular is needed to judge or extrapolate a truncated state.
 
+Because supplied RDMs and entropies cannot be regenerated from the sites, they are part of the container's content hash, as is the provenance. Values that getters derive from other supplied data are excluded, so the hash does not depend on which getters have run: a traced RDM supplied next to its blocked form, single-orbital entropies supplied next to both blocked RDMs, and two-orbital entropies. Such values must be consistent with the data they derive from. Leave volatile values such as timestamps out of the provenance if the content hash serves as a cache key.
+
 Fermionic coefficient convention
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
