@@ -881,6 +881,23 @@ class WavefunctionContainer {
    * @param j JSON object to add entropy data to
    */
   void _serialize_entropies_to_json(nlohmann::json& j) const;
+  /**
+   * @brief Write single-orbital entropies and mutual information to HDF5.
+   * @param group Container group receiving optional entropy datasets.
+   */
+  void _serialize_entropies_to_hdf5(H5::Group& group) const;
+  /**
+   * @brief Read optional entropies from a container JSON payload.
+   * @param j Container JSON written by _serialize_entropies_to_json().
+   * @return Entropies present in @p j.
+   */
+  static OrbitalEntropies _entropies_from_json(const nlohmann::json& j);
+  /**
+   * @brief Read optional entropies from a container HDF5 group.
+   * @param group Group written by _serialize_entropies_to_hdf5().
+   * @return Entropies present in @p group.
+   */
+  static OrbitalEntropies _entropies_from_hdf5(H5::Group& group);
 };
 
 /**

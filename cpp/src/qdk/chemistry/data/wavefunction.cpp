@@ -994,6 +994,78 @@ void WavefunctionContainer::_serialize_entropies_to_json(
   }
 }
 
+void WavefunctionContainer::_serialize_entropies_to_hdf5(
+    H5::Group& group) const {
+  if (_entropies.single_orbital) {
+    hsize_t soe_dims = _entropies.single_orbital->size();
+    H5::DataSpace soe_space(1, &soe_dims);
+    H5::DataSet soe_dataset = group.createDataSet(
+        "single_orbital_entropies", H5::PredType::NATIVE_DOUBLE, soe_space);
+    soe_dataset.write(_entropies.single_orbital->data(),
+                      H5::PredType::NATIVE_DOUBLE);
+  }
+  if (_entropies.mutual_information) {
+    const auto& mi = *_entropies.mutual_information;
+    hsize_t mi_dims[2] = {static_cast<hsize_t>(mi.rows()),
+                          static_cast<hsize_t>(mi.cols())};
+    H5::DataSpace mi_space(2, mi_dims);
+    H5::DataSet mi_dataset = group.createDataSet(
+        "mutual_information", H5::PredType::NATIVE_DOUBLE, mi_space);
+    // Eigen is column-major; transpose to row-major for HDF5
+    Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>
+        mi_row_major = mi;
+    mi_dataset.write(mi_row_major.data(), H5::PredType::NATIVE_DOUBLE);
+  }
+}
+
+OrbitalEntropies WavefunctionContainer::_entropies_from_json(
+    const nlohmann::json& j) {
+  OrbitalEntropies entropies;
+  if (j.contains("single_orbital_entropies")) {
+    std::vector<double> soe_data = j["single_orbital_entropies"];
+    entropies.single_orbital =
+        Eigen::Map<Eigen::VectorXd>(soe_data.data(), soe_data.size());
+  }
+  if (j.contains("mutual_information")) {
+    std::vector<double> mi_data = j["mutual_information"];
+    Eigen::Index mi_rows =
+        j.value("mutual_information_rows", static_cast<Eigen::Index>(0));
+    Eigen::Index mi_cols =
+        j.value("mutual_information_cols", static_cast<Eigen::Index>(0));
+    if (mi_rows > 0 && mi_cols > 0 &&
+        static_cast<size_t>(mi_rows * mi_cols) == mi_data.size()) {
+      entropies.mutual_information =
+          Eigen::Map<Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic,
+                                   Eigen::RowMajor>>(mi_data.data(), mi_rows,
+                                                     mi_cols);
+    }
+  }
+  return entropies;
+}
+
+OrbitalEntropies WavefunctionContainer::_entropies_from_hdf5(H5::Group& group) {
+  OrbitalEntropies entropies;
+  if (group.nameExists("single_orbital_entropies")) {
+    H5::DataSet soe_dataset = group.openDataSet("single_orbital_entropies");
+    H5::DataSpace soe_space = soe_dataset.getSpace();
+    hsize_t soe_size = soe_space.getSimpleExtentNpoints();
+    Eigen::VectorXd soe_vec(soe_size);
+    soe_dataset.read(soe_vec.data(), H5::PredType::NATIVE_DOUBLE);
+    entropies.single_orbital = soe_vec;
+  }
+  if (group.nameExists("mutual_information")) {
+    H5::DataSet mi_dataset = group.openDataSet("mutual_information");
+    H5::DataSpace mi_space = mi_dataset.getSpace();
+    hsize_t mi_dims[2];
+    mi_space.getSimpleExtentDims(mi_dims);
+    Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>
+        mi_row_major(mi_dims[0], mi_dims[1]);
+    mi_dataset.read(mi_row_major.data(), H5::PredType::NATIVE_DOUBLE);
+    entropies.mutual_information = Eigen::MatrixXd(mi_row_major);
+  }
+  return entropies;
+}
+
 std::unique_ptr<WavefunctionContainer> WavefunctionContainer::from_json(
     const nlohmann::json& j) {
   QDK_LOG_TRACE_ENTERING();
@@ -1071,27 +1143,7 @@ std::unique_ptr<WavefunctionContainer> WavefunctionContainer::from_json(
       orbitals = nullptr;
     }
 
-    // Load entropies if available
-    OrbitalEntropies entropies;
-    if (j.contains("single_orbital_entropies")) {
-      std::vector<double> soe_data = j["single_orbital_entropies"];
-      entropies.single_orbital =
-          Eigen::Map<Eigen::VectorXd>(soe_data.data(), soe_data.size());
-    }
-    if (j.contains("mutual_information")) {
-      std::vector<double> mi_data = j["mutual_information"];
-      Eigen::Index mi_rows =
-          j.value("mutual_information_rows", static_cast<Eigen::Index>(0));
-      Eigen::Index mi_cols =
-          j.value("mutual_information_cols", static_cast<Eigen::Index>(0));
-      if (mi_rows > 0 && mi_cols > 0 &&
-          static_cast<size_t>(mi_rows * mi_cols) == mi_data.size()) {
-        entropies.mutual_information =
-            Eigen::Map<Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic,
-                                     Eigen::RowMajor>>(mi_data.data(), mi_rows,
-                                                       mi_cols);
-      }
-    }
+    const auto entropies = _entropies_from_json(j);
 
     // Legacy container_type values "cas" and "sci" are accepted here to
     // support forward-looking back-compat: once the deferred 0.1.0 reader is
@@ -1869,27 +1921,7 @@ void WavefunctionContainer::to_hdf5(H5::Group& group) const {
 
     _serialize_rdms_to_hdf5(group);
 
-    // Serialize entropies if available
-    if (_entropies.single_orbital) {
-      hsize_t soe_dims = _entropies.single_orbital->size();
-      H5::DataSpace soe_space(1, &soe_dims);
-      H5::DataSet soe_dataset = group.createDataSet(
-          "single_orbital_entropies", H5::PredType::NATIVE_DOUBLE, soe_space);
-      soe_dataset.write(_entropies.single_orbital->data(),
-                        H5::PredType::NATIVE_DOUBLE);
-    }
-    if (_entropies.mutual_information) {
-      const auto& mi = *_entropies.mutual_information;
-      hsize_t mi_dims[2] = {static_cast<hsize_t>(mi.rows()),
-                            static_cast<hsize_t>(mi.cols())};
-      H5::DataSpace mi_space(2, mi_dims);
-      H5::DataSet mi_dataset = group.createDataSet(
-          "mutual_information", H5::PredType::NATIVE_DOUBLE, mi_space);
-      // Eigen is column-major; transpose to row-major for HDF5
-      Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>
-          mi_row_major = mi;
-      mi_dataset.write(mi_row_major.data(), H5::PredType::NATIVE_DOUBLE);
-    }
+    _serialize_entropies_to_hdf5(group);
 
   } catch (const H5::Exception& e) {
     throw std::runtime_error("HDF5 error: " + std::string(e.getCDetailMsg()));
@@ -2004,26 +2036,7 @@ std::unique_ptr<WavefunctionContainer> WavefunctionContainer::from_hdf5(
       orbitals = nullptr;
     }
 
-    // Load entropies if available
-    OrbitalEntropies entropies;
-    if (group.nameExists("single_orbital_entropies")) {
-      H5::DataSet soe_dataset = group.openDataSet("single_orbital_entropies");
-      H5::DataSpace soe_space = soe_dataset.getSpace();
-      hsize_t soe_size = soe_space.getSimpleExtentNpoints();
-      Eigen::VectorXd soe_vec(soe_size);
-      soe_dataset.read(soe_vec.data(), H5::PredType::NATIVE_DOUBLE);
-      entropies.single_orbital = soe_vec;
-    }
-    if (group.nameExists("mutual_information")) {
-      H5::DataSet mi_dataset = group.openDataSet("mutual_information");
-      H5::DataSpace mi_space = mi_dataset.getSpace();
-      hsize_t mi_dims[2];
-      mi_space.getSimpleExtentDims(mi_dims);
-      Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>
-          mi_row_major(mi_dims[0], mi_dims[1]);
-      mi_dataset.read(mi_row_major.data(), H5::PredType::NATIVE_DOUBLE);
-      entropies.mutual_information = Eigen::MatrixXd(mi_row_major);
-    }
+    const auto entropies = _entropies_from_hdf5(group);
 
     if (container_type == "state_vector" || container_type == "cas" ||
         container_type == "sci" || container_type == "sd") {

@@ -726,3 +726,72 @@ TEST_F(MPSContainerTest, ParticleNumberAndSpinBlockedSites) {
     EXPECT_EQ(nonzero, 4u);
   }
 }
+
+TEST_F(MPSContainerTest, SuppliedEntropiesRoundTrip) {
+  Eigen::VectorXd single(2);
+  single << 0.3, 0.7;
+  Eigen::MatrixXd mutual(2, 2);
+  mutual << 0.0, 0.2, 0.2, 0.0;
+  OrbitalEntropies entropies;
+  entropies.single_orbital = single;
+  entropies.mutual_information = mutual;
+  const MPSContainer original(sites, orbitals, nullptr, nullptr, std::nullopt,
+                              {}, std::nullopt, std::nullopt, std::nullopt,
+                              std::nullopt, std::nullopt, std::nullopt,
+                              std::nullopt, entropies);
+  H5::FileAccPropList access;
+  access.setCore(4096, false);
+  H5::H5File file("mps_entropies_in_memory.h5", H5F_ACC_TRUNC,
+                  H5::FileCreatPropList::DEFAULT, access);
+  original.to_hdf5(file);
+  const std::shared_ptr<const MPSContainer> json_copy =
+      MPSContainer::from_json(original.to_json());
+  const std::shared_ptr<const MPSContainer> hdf_copy =
+      MPSContainer::from_hdf5(file);
+  for (const auto* copy : {&original, json_copy.get(), hdf_copy.get()}) {
+    ASSERT_TRUE(copy->has_single_orbital_entropies());
+    ASSERT_TRUE(copy->has_mutual_information());
+    EXPECT_TRUE(copy->get_single_orbital_entropies().isApprox(single));
+    EXPECT_TRUE(copy->get_mutual_information().isApprox(mutual));
+    // Two-orbital entropies follow from single-orbital entropies and mutual
+    // information, so entropy-based selection can consume them directly.
+    EXPECT_TRUE(copy->has_two_orbital_entropies());
+  }
+
+  // Two-orbital entropies are stored as the mutual information they imply,
+  // so the pair information survives serialization.
+  Eigen::MatrixXd pair(2, 2);
+  pair << 0.0, 0.8, 0.8, 0.0;
+  OrbitalEntropies two_orbital;
+  two_orbital.single_orbital = single;
+  two_orbital.two_orbital = pair;
+  const MPSContainer from_pairs(sites, orbitals, nullptr, nullptr, std::nullopt,
+                                {}, std::nullopt, std::nullopt, std::nullopt,
+                                std::nullopt, std::nullopt, std::nullopt,
+                                std::nullopt, two_orbital);
+  const auto restored_pairs = MPSContainer::from_json(from_pairs.to_json());
+  EXPECT_TRUE(restored_pairs->get_mutual_information().isApprox(mutual));
+  EXPECT_TRUE(restored_pairs->get_two_orbital_entropies().isApprox(pair));
+  two_orbital.single_orbital.reset();
+  EXPECT_THROW(
+      MPSContainer(sites, orbitals, nullptr, nullptr, std::nullopt, {},
+                   std::nullopt, std::nullopt, std::nullopt, std::nullopt,
+                   std::nullopt, std::nullopt, std::nullopt, two_orbital),
+      std::invalid_argument);
+
+  OrbitalEntropies wrong_size;
+  wrong_size.single_orbital = Eigen::VectorXd::Ones(3);
+  EXPECT_THROW(
+      MPSContainer(sites, orbitals, nullptr, nullptr, std::nullopt, {},
+                   std::nullopt, std::nullopt, std::nullopt, std::nullopt,
+                   std::nullopt, std::nullopt, std::nullopt, wrong_size),
+      std::invalid_argument);
+  OrbitalEntropies nonfinite;
+  nonfinite.mutual_information =
+      Eigen::MatrixXd::Constant(2, 2, std::numeric_limits<double>::quiet_NaN());
+  EXPECT_THROW(
+      MPSContainer(sites, orbitals, nullptr, nullptr, std::nullopt, {},
+                   std::nullopt, std::nullopt, std::nullopt, std::nullopt,
+                   std::nullopt, std::nullopt, std::nullopt, nonfinite),
+      std::invalid_argument);
+}

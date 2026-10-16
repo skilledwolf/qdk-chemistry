@@ -151,7 +151,8 @@ MPSContainer::SitePtr site_from_metadata(const nlohmann::json& json,
 
 std::unique_ptr<MPSContainer> mps_from_metadata(
     const nlohmann::json& json, std::shared_ptr<Orbitals> orbitals,
-    std::vector<MPSContainer::SitePtr> sites) {
+    std::vector<MPSContainer::SitePtr> sites,
+    const OrbitalEntropies& entropies) {
   std::optional<std::size_t> center;
   if (!json.at("orthogonality_center").is_null()) {
     center = read_index(json.at("orthogonality_center"));
@@ -168,7 +169,9 @@ std::unique_ptr<MPSContainer> mps_from_metadata(
   return std::make_unique<MPSContainer>(
       std::move(sites), std::move(orbitals),
       read_counts(json.at("total_num_particles")),
-      read_counts(json.at("active_num_particles")), center, std::move(order));
+      read_counts(json.at("active_num_particles")), center, std::move(order),
+      std::nullopt, std::nullopt, std::nullopt, std::nullopt, std::nullopt,
+      std::nullopt, std::nullopt, entropies);
 }
 
 /**
@@ -361,10 +364,11 @@ MPSContainer::MPSContainer(
     const std::optional<VectorVariant>& two_rdm_spin_traced,
     const std::optional<VectorVariant>& two_rdm_aaaa,
     const std::optional<VectorVariant>& two_rdm_aabb,
-    const std::optional<VectorVariant>& two_rdm_bbbb)
+    const std::optional<VectorVariant>& two_rdm_bbbb,
+    const OrbitalEntropies& entropies)
     : WavefunctionContainer(one_rdm_spin_traced, one_rdm_aa, one_rdm_bb,
                             two_rdm_spin_traced, two_rdm_aaaa, two_rdm_aabb,
-                            two_rdm_bbbb),
+                            two_rdm_bbbb, entropies),
       _sites(std::move(sites)),
       _orbitals(std::move(orbitals)),
       _total_num_particles(std::move(total_num_particles)),
@@ -377,6 +381,34 @@ MPSContainer::MPSContainer(
               std::size_t{});
   }
   _validate();
+  _validate_entropies();
+  // Serialization keeps pair entropies as mutual information only.
+  if (_entropies.two_orbital && !_entropies.mutual_information) {
+    get_mutual_information();
+  }
+}
+
+void MPSContainer::_validate_entropies() const {
+  const auto n = static_cast<Eigen::Index>(num_sites());
+  const auto& single = _entropies.single_orbital;
+  if (single && (single->size() != n || !single->allFinite())) {
+    throw std::invalid_argument(
+        "MPS single-orbital entropies must be finite with one entry per "
+        "active site.");
+  }
+  for (const auto* matrix :
+       {&_entropies.two_orbital, &_entropies.mutual_information}) {
+    if (*matrix && ((*matrix)->rows() != n || (*matrix)->cols() != n ||
+                    !(*matrix)->allFinite())) {
+      throw std::invalid_argument(
+          "MPS two-orbital entropies and mutual information must be finite "
+          "(active sites, active sites) matrices.");
+    }
+  }
+  if (_entropies.two_orbital && !single) {
+    throw std::invalid_argument(
+        "MPS two-orbital entropies require single-orbital entropies.");
+  }
 }
 
 void MPSContainer::_validate() const {
@@ -580,6 +612,7 @@ nlohmann::json MPSContainer::to_json() const {
   auto json = _metadata_to_json();
   json["orbitals"] = _orbitals->to_json();
   _serialize_rdms_to_json(json);
+  _serialize_entropies_to_json(json);
   for (std::size_t i = 0; i < num_sites(); ++i) {
     json["sites"][i]["tensor"] =
         std::visit([](const auto& tensor) { return tensor.to_json(); },
@@ -609,8 +642,9 @@ std::unique_ptr<MPSContainer> MPSContainer::from_json(
       }
       sites.push_back(site_from_metadata(site, std::move(payload)));
     }
-    auto result = mps_from_metadata(
-        json, Orbitals::from_json(json.at("orbitals")), std::move(sites));
+    auto result =
+        mps_from_metadata(json, Orbitals::from_json(json.at("orbitals")),
+                          std::move(sites), _entropies_from_json(json));
     result->_deserialize_rdms_from_json(json);
     return result;
   } catch (const nlohmann::json::exception& error) {
@@ -640,6 +674,7 @@ void MPSContainer::to_hdf5(H5::Group& group) const {
                  _sites[i]->tensor());
     }
     _serialize_rdms_to_hdf5(group);
+    _serialize_entropies_to_hdf5(group);
   } catch (const H5::Exception& error) {
     throw std::runtime_error("Failed to write MPS HDF5: " +
                              error.getDetailMsg());
@@ -676,8 +711,9 @@ std::unique_ptr<MPSContainer> MPSContainer::from_hdf5(H5::Group& group) {
       sites.push_back(
           site_from_metadata(json.at("sites").at(i), std::move(value)));
     }
-    auto result = mps_from_metadata(json, Orbitals::from_hdf5(orbitals),
-                                    std::move(sites));
+    auto result =
+        mps_from_metadata(json, Orbitals::from_hdf5(orbitals), std::move(sites),
+                          _entropies_from_hdf5(group));
     result->_deserialize_rdms_from_hdf5(group);
     return result;
   } catch (const H5::Exception& error) {

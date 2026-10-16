@@ -195,3 +195,28 @@ def test_particle_number_and_spin_blocked_sites(tmp_path):
             state = "".join(states)
             actual = wavefunction.get_coefficient(Configuration.from_spin_half_string(state))
             assert actual == pytest.approx(expected.get(state, 0.0), abs=1e-14), state
+
+
+def test_supplied_entropies(site_data, tmp_path):
+    """Producer-supplied entropies reach the wavefunction accessors and survive serialization."""
+    single = np.array([0.3, 0.7])
+    mutual = np.array([[0.0, 0.2], [0.2, 0.0]])
+    sites = [make_site(values) for values in site_data]
+    original = Wavefunction(
+        MPSContainer(sites, ModelOrbitals(2), entropies={"single_orbital": single, "mutual_information": mutual})
+    )
+    path = tmp_path / "entropies.wavefunction.h5"
+    original.to_file(path, "hdf5")
+    for wavefunction in [original, Wavefunction.from_json(original.to_json()), Wavefunction.from_file(path, "hdf5")]:
+        np.testing.assert_array_equal(wavefunction.get_single_orbital_entropies(), single)
+        np.testing.assert_array_equal(wavefunction.get_mutual_information(), mutual)
+    pairs = Wavefunction(
+        MPSContainer(
+            sites, ModelOrbitals(2), entropies={"single_orbital": single, "two_orbital": np.array([[0, 0.8], [0.8, 0]])}
+        )
+    )
+    np.testing.assert_allclose(Wavefunction.from_json(pairs.to_json()).get_mutual_information(), mutual)
+    with pytest.raises(ValueError, match="single-orbital entropies"):
+        MPSContainer(sites, ModelOrbitals(2), entropies={"single_orbital": np.ones(3)})
+    with pytest.raises(ValueError, match="require single-orbital entropies"):
+        MPSContainer(sites, ModelOrbitals(2), entropies={"two_orbital": np.zeros((2, 2))})

@@ -137,6 +137,8 @@ Matrix product state container
 
 :class:`~qdk_chemistry.data.MPSContainer` stores an open-boundary matrix product state supplied by an external producer. Each :class:`~qdk_chemistry.data.MPSSite` has tensor axes ``(left bond, physical state, right bond)``; its dense export is packed as a matrix with row ``left * physical_dimension + physical`` and column ``right``. Construction and serialization preserve the supplied coefficients, including their scale and complex phase; they do not normalize or canonicalize the state.
 
+Producers may also supply single-orbital entropies and mutual information in active-orbital order. They are serialized with the container and feed entropy-based active-space selection without requiring the full two-particle RDM. Two-orbital entropies may be supplied with single-orbital entropies instead; they are stored as the mutual information they imply.
+
 Fermionic coefficient convention
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 

@@ -147,8 +147,16 @@ class MPSContainer : public WavefunctionContainer {
    * @param two_rdm_bbbb Optional flattened beta-beta-beta-beta 2-RDM block.
    * RDMs use the same conventions and real/complex storage as
    * StateVectorContainer. They are supplied data, not computed from the sites.
+   * @param entropies Optional single-orbital entropies, two-orbital entropies
+   * and mutual information in active-orbital order, as for
+   * StateVectorContainer. Serialization stores single-orbital entropies and
+   * mutual information; two-orbital entropies are derived from them. Supplied
+   * two-orbital entropies therefore require single-orbital entropies, and
+   * missing mutual information is derived from them on construction.
    * @throws std::invalid_argument for null sites/basis, incompatible bonds or
-   * scalar types, or invalid site counts, permutations or center indices.
+   * scalar types, invalid site counts, permutations or center indices, or
+   * entropies that are not finite, not sized by the active sites, or
+   * two-orbital entropies without single-orbital entropies.
    */
   MPSContainer(
       std::vector<SitePtr> sites, std::shared_ptr<Orbitals> orbitals,
@@ -162,7 +170,8 @@ class MPSContainer : public WavefunctionContainer {
       const std::optional<VectorVariant>& two_rdm_spin_traced = std::nullopt,
       const std::optional<VectorVariant>& two_rdm_aaaa = std::nullopt,
       const std::optional<VectorVariant>& two_rdm_aabb = std::nullopt,
-      const std::optional<VectorVariant>& two_rdm_bbbb = std::nullopt);
+      const std::optional<VectorVariant>& two_rdm_bbbb = std::nullopt,
+      const OrbitalEntropies& entropies = OrbitalEntropies{});
 
   /** @brief Immutable sites in chain order. */
   const std::vector<SitePtr>& sites() const { return _sites; }
@@ -299,6 +308,8 @@ class MPSContainer : public WavefunctionContainer {
   /** @brief Validate site/basis counts, adjacent bonds, boundaries, and
    * ordering. */
   void _validate() const;
+  /** @brief Check supplied entropy dimensions and finiteness. */
+  void _validate_entropies() const;
   /** @brief Serialize chain metadata without binary tensors, orbitals, or RDMs.
    */
   nlohmann::json _metadata_to_json() const;

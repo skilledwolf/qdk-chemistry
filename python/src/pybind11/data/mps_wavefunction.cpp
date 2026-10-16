@@ -20,6 +20,11 @@
 
 namespace py = pybind11;
 using namespace qdk::chemistry::data;
+using MatrixVariant = ContainerTypes::MatrixVariant;
+using VectorVariant = ContainerTypes::VectorVariant;
+
+// Defined in wavefunction.cpp.
+OrbitalEntropies parse_entropies(const py::object& obj);
 
 namespace {
 
@@ -97,18 +102,30 @@ void bind_mps_wavefunction(py::module& data) {
       "have different local bases. Scale, phase and gauge are preserved; "
       "particle counts and canonical center are optional, unverified producer "
       "metadata.")
-      .def(py::init<std::vector<MPSContainer::SitePtr>,
-                    std::shared_ptr<Orbitals>,
-                    std::shared_ptr<const MPSContainer::ParticleCount>,
-                    std::shared_ptr<const MPSContainer::ParticleCount>,
-                    std::optional<std::size_t>, std::vector<std::size_t>,
-                    const std::optional<ContainerTypes::MatrixVariant>&,
-                    const std::optional<ContainerTypes::MatrixVariant>&,
-                    const std::optional<ContainerTypes::MatrixVariant>&,
-                    const std::optional<ContainerTypes::VectorVariant>&,
-                    const std::optional<ContainerTypes::VectorVariant>&,
-                    const std::optional<ContainerTypes::VectorVariant>&,
-                    const std::optional<ContainerTypes::VectorVariant>&>(),
+      .def(py::init([](std::vector<MPSContainer::SitePtr> sites,
+                       std::shared_ptr<Orbitals> orbitals,
+                       std::shared_ptr<const MPSContainer::ParticleCount>
+                           total_num_particles,
+                       std::shared_ptr<const MPSContainer::ParticleCount>
+                           active_num_particles,
+                       std::optional<std::size_t> orthogonality_center,
+                       std::vector<std::size_t> site_to_orbital_order,
+                       const std::optional<MatrixVariant>& one_rdm_spin_traced,
+                       const std::optional<MatrixVariant>& one_rdm_aa,
+                       const std::optional<MatrixVariant>& one_rdm_bb,
+                       const std::optional<VectorVariant>& two_rdm_spin_traced,
+                       const std::optional<VectorVariant>& two_rdm_aaaa,
+                       const std::optional<VectorVariant>& two_rdm_aabb,
+                       const std::optional<VectorVariant>& two_rdm_bbbb,
+                       const py::object& entropies) {
+             return std::make_unique<MPSContainer>(
+                 std::move(sites), std::move(orbitals),
+                 std::move(total_num_particles),
+                 std::move(active_num_particles), orthogonality_center,
+                 std::move(site_to_orbital_order), one_rdm_spin_traced,
+                 one_rdm_aa, one_rdm_bb, two_rdm_spin_traced, two_rdm_aaaa,
+                 two_rdm_aabb, two_rdm_bbbb, parse_entropies(entropies));
+           }),
            py::arg("sites"), py::arg("orbitals"),
            py::arg("total_num_particles") = nullptr,
            py::arg("active_num_particles") = nullptr,
@@ -121,8 +138,11 @@ void bind_mps_wavefunction(py::module& data) {
            py::arg("two_rdm_aaaa") = std::nullopt,
            py::arg("two_rdm_aabb") = std::nullopt,
            py::arg("two_rdm_bbbb") = std::nullopt,
+           py::arg("entropies") = py::none(),
            "Store supplied sites and optional real/complex RDM arrays. RDMs "
-           "use active-orbital order. ")
+           "and entropies use active-orbital order. ``entropies`` is a dict "
+           "with optional keys 'single_orbital', 'two_orbital' and "
+           "'mutual_information'.")
       .def_property_readonly("sites", &MPSContainer::sites)
       .def_property_readonly("orbitals", &MPSContainer::get_orbitals)
       .def("has_total_num_particles", &MPSContainer::has_total_num_particles)
