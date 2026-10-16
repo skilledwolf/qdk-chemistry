@@ -142,6 +142,10 @@ void bind_mps_wavefunction(py::module& data) {
       .def_property_readonly("is_complex", &MPSContainer::is_complex)
       .def_property_readonly("max_bond_dimension",
                              &MPSContainer::max_bond_dimension)
+      .def("get_coefficient", &MPSContainer::get_coefficient, py::arg("det"),
+           "Amplitude of an active-space determinant (all alpha modes before "
+           "all beta modes, each ascending), contracted from the sites with "
+           "the fermionic sign of the site-to-orbital order.")
       .def(
           "to_json",
           [](const MPSContainer& self) { return self.to_json().dump(); },

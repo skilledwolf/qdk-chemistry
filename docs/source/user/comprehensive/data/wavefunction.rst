@@ -132,6 +132,58 @@ The same container holds coupled cluster amplitudes when tagged as ``CCSD``:
       :start-after: // start-cell-create-cc
       :end-before: // end-cell-create-cc
 
+Matrix product state container
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+:class:`~qdk_chemistry.data.MPSContainer` stores an open-boundary matrix product state supplied by an external producer. Each :class:`~qdk_chemistry.data.MPSSite` has tensor axes ``(left bond, physical state, right bond)``; its dense export is packed as a matrix with row ``left * physical_dimension + physical`` and column ``right``. Construction and serialization preserve the supplied coefficients, including their scale and complex phase; they do not normalize or canonicalize the state.
+
+Fermionic coefficient convention
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The default four-state physical basis ``(0,u,d,2)`` denotes
+
+.. math::
+
+   |0\rangle = |\mathrm{vac}\rangle,\qquad
+   |u\rangle = a^\dagger_\alpha |\mathrm{vac}\rangle,\qquad
+   |d\rangle = a^\dagger_\beta |\mathrm{vac}\rangle,\qquad
+   |2\rangle = a^\dagger_\alpha a^\dagger_\beta |\mathrm{vac}\rangle.
+
+Contracting the sites gives coefficients in the product basis whose creation operators are written from left to right in chain-site order, alpha before beta within each site. An explicit ``physical_basis`` may reorder or restrict the local states; it does not change their phases. The binary basis ``(0,1)`` similarly denotes the vacuum and one occupied spinless mode. Producers whose local states use another operator order convert with a site-local sign on the affected physical states; for example, a doubly occupied state defined as :math:`a^\dagger_\beta a^\dagger_\alpha|\mathrm{vac}\rangle` is the negative of ``2``.
+
+``site_to_orbital_order[s]`` identifies the active-orbital slot represented by chain site ``s``; an omitted order is the identity. These are active-space slots, not indices in the full molecular-orbital basis. The container stores the mapping without rearranging tensors or changing signs.
+
+Determinant coefficients, as stored in :class:`~qdk_chemistry.data.StateVectorContainer`, order the creation operators with all alpha modes before all beta modes, each in ascending orbital order. :meth:`~qdk_chemistry.data.MPSContainer.get_coefficient` contracts the sites for one determinant and multiplies by the parity of the permutation that sorts the chain-ordered operators into that order. The sign is required even for the identity site order: ``|2u>`` creates :math:`a^\dagger_{0\alpha}a^\dagger_{0\beta}a^\dagger_{1\alpha}`, which needs one exchange to reach determinant order. Spinless modes follow the same rule when their site order is permuted.
+
+A small reference state is
+
+.. math::
+
+   |\Psi\rangle = \tfrac12\left(|2u0\rangle + i|u02\rangle - |udu\rangle - i|02u\rangle\right)
+
+in chain order. For ``site_to_orbital_order = [2,0,1]`` its nonzero determinant coefficients are listed below, with occupations written as ``alpha_0 alpha_1 alpha_2 beta_0 beta_1 beta_2``.
+
+.. list-table:: Signed reference amplitudes
+   :header-rows: 1
+
+   * - Chain configuration
+     - Determinant occupation bits
+     - Coefficient
+   * - ``2u0``
+     - ``101001``
+     - :math:`1/2`
+   * - ``u02``
+     - ``011010``
+     - :math:`-i/2`
+   * - ``udu``
+     - ``011100``
+     - :math:`-1/2`
+   * - ``02u``
+     - ``110100``
+     - :math:`i/2`
+
+``python/tests/test_mps_conventions.py`` checks these amplitudes before and after JSON and HDF5 round trips, and checks an exact MPS of a ground state against the signed determinant coefficients computed by MACIS.
+
 Properties
 ~~~~~~~~~~
 
