@@ -310,6 +310,8 @@ def test_provenance(site_data, tmp_path):
     assert MPSContainer(sites, ModelOrbitals(2)).provenance == {}
     with pytest.raises(ValueError, match="JSON object"):
         MPSContainer(sites, ModelOrbitals(2), provenance=[1, 2])
+    with pytest.raises(ValueError, match="JSON compliant"):
+        MPSContainer(sites, ModelOrbitals(2), provenance={"energy": float("nan")})
 
 
 def test_supplied_properties_define_content_hash(site_data):

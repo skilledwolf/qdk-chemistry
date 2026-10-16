@@ -9,10 +9,13 @@
 #include <cstdio>
 #include <memory>
 #include <nlohmann/json.hpp>
+#include <optional>
 #include <qdk/chemistry/data/wavefunction.hpp>
 #include <qdk/chemistry/data/wavefunction_containers/state_vector.hpp>
 #include <stdexcept>
+#include <string>
 #include <tuple>
+#include <vector>
 
 #include "ut_common.hpp"
 
@@ -417,6 +420,56 @@ TEST_F(WavefunctionCoreTest, LazyTwoOrbitalEntropyFromS1AndMutualInfo) {
   EXPECT_TRUE(wf.has_two_orbital_entropies());
   EXPECT_TRUE(wf.get_two_orbital_entropies().isApprox(expected_s2,
                                                       testing::wf_tolerance));
+}
+
+TEST_F(WavefunctionCoreTest, TwoOrbitalEntropiesSurviveSerialization) {
+  // Supplied two-orbital entropies are stored, even without the single-orbital
+  // entropies needed to convert them to mutual information.
+  auto test_orbitals = testing::create_test_orbitals();
+  Wavefunction::DeterminantVector dets = {
+      Configuration::from_spin_half_string("20")};
+  Eigen::VectorXd coeffs(1);
+  coeffs << 1.0;
+  Eigen::MatrixXd s2(2, 2);
+  s2 << 0.0, 0.8, 0.8, 0.0;
+  OrbitalEntropies entropies;
+  entropies.two_orbital = s2;
+  Wavefunction wf(std::make_unique<StateVectorContainer>(
+      coeffs, dets, test_orbitals, std::nullopt, std::nullopt,
+      Wavefunction::DEFAULT_SECTOR, entropies));
+  const std::string filename =
+      "test_wavefunction_two_orbital_entropies.wavefunction.h5";
+  wf.to_hdf5_file(filename);
+  std::vector<std::shared_ptr<const Wavefunction>> restored;
+  restored.push_back(Wavefunction::from_hdf5_file(filename));
+  std::remove(filename.c_str());
+  restored.push_back(Wavefunction::from_json(wf.to_json()));
+  for (const auto& copy : restored) {
+    ASSERT_TRUE(copy->has_two_orbital_entropies());
+    EXPECT_TRUE(copy->get_two_orbital_entropies().isApprox(s2));
+  }
+}
+
+TEST_F(WavefunctionCoreTest, RejectsTwoRdmWithoutOppositeSpinBlock) {
+  // A missing same-spin block may be restricted, but aabb is never inferred.
+  auto test_orbitals = testing::create_test_orbitals(2, 2);
+  Wavefunction::DeterminantVector dets = {
+      Configuration::from_spin_half_string("20")};
+  const ContainerTypes::VectorVariant coeffs = Eigen::VectorXd::Ones(1).eval();
+  const ContainerTypes::VectorVariant block = Eigen::VectorXd::Zero(16).eval();
+  auto with_two_rdm =
+      [&](const std::optional<ContainerTypes::VectorVariant>& aaaa,
+          const std::optional<ContainerTypes::VectorVariant>& aabb,
+          const std::optional<ContainerTypes::VectorVariant>& bbbb) {
+        return StateVectorContainer(coeffs, dets, test_orbitals, std::nullopt,
+                                    std::nullopt, std::nullopt, std::nullopt,
+                                    aaaa, aabb, bbbb);
+      };
+  EXPECT_THROW(with_two_rdm(block, std::nullopt, std::nullopt),
+               std::invalid_argument);
+  EXPECT_THROW(with_two_rdm(std::nullopt, block, std::nullopt),
+               std::invalid_argument);
+  EXPECT_NO_THROW(with_two_rdm(block, block, std::nullopt));
 }
 
 // ---- Single-particle sectors ----------------------------------------------

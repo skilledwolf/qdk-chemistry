@@ -149,9 +149,11 @@ void bind_mps_wavefunction(py::module& data) {
                  rdm_from_python(active_two_rdm), parse_entropies(entropies),
                  provenance.is_none()
                      ? nlohmann::json::object()
-                     : nlohmann::json::parse(py::module_::import("json")
-                                                 .attr("dumps")(provenance)
-                                                 .cast<std::string>()));
+                     : nlohmann::json::parse(
+                           py::module_::import("json")
+                               .attr("dumps")(provenance,
+                                              py::arg("allow_nan") = false)
+                               .cast<std::string>()));
            }),
            py::arg("sites"), py::arg("orbitals"),
            py::arg("total_num_particles") = nullptr,

@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <complex>
 #include <cstdint>
 #include <limits>
@@ -263,10 +264,8 @@ Scalar contract_amplitude(const std::vector<MPSContainer::SitePtr>& sites,
       local -= extent;
     }
     const auto physical_extent = tensor.extents()[1].at(*sector);
-    const auto left_offsets =
-        sector_offsets(tensor.extents()[0], site.left_sector_order());
-    const auto right_offsets =
-        sector_offsets(tensor.extents()[2], site.right_sector_order());
+    const auto& left_offsets = site.packed_offsets(0);
+    const auto& right_offsets = site.packed_offsets(2);
     Vector right =
         Vector::Zero(static_cast<Eigen::Index>(site.right_bond_dimension()));
     for (const auto& [labels, block] : tensor.blocks()) {
@@ -286,6 +285,26 @@ Scalar contract_amplitude(const std::vector<MPSContainer::SitePtr>& sites,
   return left(0);
 }
 
+/**
+ * @brief Copy a JSON value with integral floating-point numbers stored as
+ * integers, so 512 and 512.0 serialize alike without rounding large integers.
+ * @param value JSON value to normalize.
+ * @return Value whose numbers serialize alike exactly when their values agree.
+ */
+nlohmann::json canonical_numbers(const nlohmann::json& value) {
+  if (value.is_number_float()) {
+    const double number = value.get<double>();
+    if (std::trunc(number) == number && std::abs(number) < 0x1p63) {
+      return static_cast<std::int64_t>(number);
+    }
+    return value;
+  }
+  if (!value.is_structured()) return value;
+  auto result = value;
+  for (auto& item : result) item = canonical_numbers(item);
+  return result;
+}
+
 }  // namespace
 
 MPSSite::MPSSite(TensorPtr tensor, SectorOrders sector_orders,
@@ -300,6 +319,14 @@ MPSSite::MPSSite(TensorPtr tensor, SectorOrders sector_orders,
     _physical_basis = default_physical_basis(physical_dimension());
   }
   _validate();
+  std::visit(
+      [this](const auto& value) {
+        for (std::size_t slot = 0; slot < 3; ++slot) {
+          _packed_offsets[slot] =
+              sector_offsets(value.extents()[slot], _sector_orders[slot]);
+        }
+      },
+      *_tensor);
 }
 
 void MPSSite::_validate() const {
@@ -459,7 +486,8 @@ MPSContainer::MPSContainer(
   _validate();
   _validate_rdms();
   _validate_entropies();
-  // Serialization keeps pair entropies as mutual information only.
+  // Store pair entropies as mutual information up front, so the hashed
+  // mutual information does not depend on which getters ran.
   if (_entropies.two_orbital && !_entropies.mutual_information) {
     get_mutual_information();
   }
@@ -977,16 +1005,23 @@ void MPSContainer::hash_update(qdk::chemistry::utils::HashContext& ctx) const {
     hash_value(ctx, site->physical_basis());
   }
   // Getters fill traced RDMs from blocked RDMs, single-orbital entropies from
-  // both blocked RDMs, and two-orbital entropies from mutual information.
+  // both blocked RDMs when they are real, and two-orbital entropies from
+  // mutual information.
   hash_value(ctx, _active_one_rdm);
   if (!_active_one_rdm) hash_value(ctx, _one_rdm_spin_traced);
   hash_value(ctx, _active_two_rdm);
   if (!_active_two_rdm) hash_value(ctx, _two_rdm_spin_traced);
-  if (!_active_one_rdm || !_active_two_rdm) {
+  const bool single_orbital_derivable =
+      _active_one_rdm && _active_two_rdm &&
+      std::holds_alternative<SymmetryBlockedTensor<2, double>>(
+          *_active_one_rdm) &&
+      std::holds_alternative<SymmetryBlockedTensor<4, double>>(
+          *_active_two_rdm);
+  if (!single_orbital_derivable) {
     hash_value(ctx, _entropies.single_orbital);
   }
   hash_value(ctx, _entropies.mutual_information);
-  hash_value(ctx, _provenance.dump());
+  hash_value(ctx, canonical_numbers(_provenance).dump());
 }
 
 std::unique_ptr<WavefunctionContainer> MPSContainer::clone() const {

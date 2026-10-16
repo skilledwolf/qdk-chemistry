@@ -987,6 +987,64 @@ TEST_F(MPSContainerTest, ContentHashIgnoresLazilyDerivedProperties) {
   }
 }
 
+TEST_F(MPSContainerTest, HashKeepsUnderivableEntropiesAndNumberValues) {
+  auto hash = [](const MPSContainer& container) {
+    return Wavefunction(container.clone()).content_hash();
+  };
+  const ContainerTypes::MatrixVariant one =
+      Eigen::MatrixXcd::Identity(2, 2).eval();
+  const ContainerTypes::VectorVariant two = Eigen::VectorXcd::Zero(16).eval();
+  auto with_single = [&](double value) {
+    OrbitalEntropies entropies;
+    entropies.single_orbital = Eigen::Vector2d(0.3, value);
+    return MPSContainer(sites, orbitals, nullptr, nullptr, std::nullopt, {},
+                        std::nullopt, one, one, std::nullopt, two, two, two,
+                        std::nullopt, std::nullopt, entropies);
+  };
+  // Complex RDMs do not determine single-orbital entropies.
+  EXPECT_NE(hash(with_single(0.7)), hash(with_single(0.6)));
+
+  auto with_provenance = [&](const nlohmann::json& provenance) {
+    return MPSContainer(sites, orbitals, nullptr, nullptr, std::nullopt, {},
+                        std::nullopt, std::nullopt, std::nullopt, std::nullopt,
+                        std::nullopt, std::nullopt, std::nullopt, std::nullopt,
+                        std::nullopt, OrbitalEntropies{}, provenance);
+  };
+  EXPECT_EQ(hash(with_provenance({{"bond_dimension", 512}})),
+            hash(with_provenance({{"bond_dimension", 512.0}})));
+  EXPECT_NE(hash(with_provenance({{"bond_dimension", 512}})),
+            hash(with_provenance({{"bond_dimension", 513}})));
+  // Integers beyond double precision stay distinct.
+  EXPECT_NE(hash(with_provenance({{"seed", 9007199254740992}})),
+            hash(with_provenance({{"seed", 9007199254740993}})));
+}
+
+TEST_F(MPSContainerTest, RejectsMalformedSerializedEntropies) {
+  OrbitalEntropies entropies;
+  entropies.single_orbital = Eigen::Vector2d(0.3, 0.7);
+  entropies.mutual_information = Eigen::Matrix2d{{0., 0.2}, {0.2, 0.}};
+  const MPSContainer original(
+      sites, orbitals, nullptr, nullptr, std::nullopt, {}, std::nullopt,
+      std::nullopt, std::nullopt, std::nullopt, std::nullopt, std::nullopt,
+      std::nullopt, std::nullopt, std::nullopt, entropies);
+  auto json = original.to_json();
+  json.erase("mutual_information_rows");
+  EXPECT_THROW(MPSContainer::from_json(json), std::runtime_error);
+
+  H5::FileAccPropList access;
+  access.setCore(4096, false);
+  H5::H5File file("mps_flat_mutual_information_in_memory.h5", H5F_ACC_TRUNC,
+                  H5::FileCreatPropList::DEFAULT, access);
+  original.to_hdf5(file);
+  ASSERT_GE(H5Ldelete(file.getId(), "mutual_information", H5P_DEFAULT), 0);
+  const hsize_t size = 4;
+  const std::array<double, 4> flat{0., 0.2, 0.2, 0.};
+  file.createDataSet("mutual_information", H5::PredType::NATIVE_DOUBLE,
+                     H5::DataSpace(1, &size))
+      .write(flat.data(), H5::PredType::NATIVE_DOUBLE);
+  EXPECT_THROW(MPSContainer::from_hdf5(file), std::runtime_error);
+}
+
 TEST_F(MPSContainerTest, RejectsInvalidStructure) {
   EXPECT_THROW(MPSContainer({}, orbitals), std::invalid_argument);
   EXPECT_THROW(MPSContainer({nullptr, sites[1]}, orbitals),

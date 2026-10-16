@@ -11,6 +11,7 @@
 #include <qdk/chemistry/data/symmetry/symmetry_blocked_tensor.hpp>
 #include <qdk/chemistry/data/wavefunction.hpp>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace qdk::chemistry::data {
@@ -85,6 +86,15 @@ class MPSSite {
   std::size_t right_bond_dimension() const;
   /** @brief Whether the tensor uses complex coefficients. */
   bool is_complex() const;
+  /**
+   * @brief Offset of each sector in the packed ordering of one slot.
+   * @param slot Slot index: left (0), physical (1), or right (2).
+   * @return Map from sector label to its first packed index.
+   */
+  const std::unordered_map<SymmetryLabel, std::size_t>& packed_offsets(
+      std::size_t slot) const {
+    return _packed_offsets.at(slot);
+  }
 
   /**
    * @brief Materialize the site for dense interoperability.
@@ -106,6 +116,7 @@ class MPSSite {
   TensorPtr _tensor;
   SectorOrders _sector_orders;
   std::vector<Configuration> _physical_basis;
+  std::array<std::unordered_map<SymmetryLabel, std::size_t>, 3> _packed_offsets;
 };
 
 /**
@@ -165,10 +176,10 @@ class MPSContainer : public WavefunctionContainer {
    * tensors remains the producer's responsibility.
    * @param entropies Optional single-orbital entropies, two-orbital entropies
    * and mutual information in active-orbital order, as for
-   * StateVectorContainer. Serialization stores single-orbital entropies and
-   * mutual information; two-orbital entropies are derived from them. Supplied
-   * two-orbital entropies therefore require single-orbital entropies, and
-   * missing mutual information is derived from them on construction.
+   * StateVectorContainer. Supplied two-orbital entropies require
+   * single-orbital entropies; missing mutual information is derived from them
+   * on construction, so the stored pair information does not depend on which
+   * getters ran.
    * @param provenance JSON object describing how the state was produced, for
    * example producer name and version, energy, discarded weight and bond
    * dimensions. It is stored and serialized verbatim and is not interpreted.
@@ -345,9 +356,10 @@ class MPSContainer : public WavefunctionContainer {
    * from the sites, so clear_caches() keeps them. Values that getters derive
    * lazily are excluded so the hash does not depend on which getters ran: a
    * traced RDM is hashed only without its blocked RDM, single-orbital
-   * entropies only without both blocked RDMs, and two-orbital entropies never.
-   * Such supplied values must be consistent with the data they derive from.
-   * Provenance is hashed like other supplied data.
+   * entropies only without both real blocked RDMs, and two-orbital entropies
+   * never. Such supplied values must be consistent with the data they derive
+   * from. Provenance is hashed like other supplied data, with numbers compared
+   * by value.
    * @param ctx Content-hash context to update.
    */
   void hash_update(qdk::chemistry::utils::HashContext& ctx) const override;
