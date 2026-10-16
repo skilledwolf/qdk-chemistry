@@ -649,3 +649,80 @@ TEST_F(MPSContainerTest, CoefficientRejectsMismatchedConfigurations) {
                 Configuration::from_spin_half_string("u0u"))),
             0.0);
 }
+
+TEST_F(MPSContainerTest, ParticleNumberAndSpinBlockedSites) {
+  using SBT = SymmetryBlockedTensor<3>;
+  // Physical and bond indices carry (N, 2Ms). Both parities of 2Ms occur, so
+  // these sectors need spin_projection rather than a spin multiplet axis.
+  auto symmetry = std::make_shared<const SymmetryProduct>(
+      SymmetryProduct({axes::particle_number(4), axes::spin_projection(2)}));
+  auto label = [](std::size_t number, int two_ms) {
+    return SymmetryLabel(
+        {axes::particle_number_value(number), axes::spin_value(two_ms)});
+  };
+  // The default physical basis (0,u,d,2) has one state per sector.
+  const std::vector<SymmetryLabel> physical{label(0, 0), label(1, 1),
+                                            label(1, -1), label(2, 0)};
+  const auto vacuum = label(0, 0);
+  const auto total = label(2, 0);
+  SBT::ExtentsArray first_extents, second_extents;
+  first_extents[0][vacuum] = 1;
+  second_extents[2][total] = 1;
+  SBT::BlockMap first_blocks, second_blocks;
+  // Charges accumulate from the left: q_left + q_physical = q_right, so each
+  // first-site sector pairs with its complement on the second site.
+  for (std::size_t i = 0; i < physical.size(); ++i) {
+    first_extents[1][physical[i]] = first_extents[2][physical[i]] = 1;
+    second_extents[0][physical[i]] = second_extents[1][physical[i]] = 1;
+    first_blocks[{vacuum, physical[i], physical[i]}] =
+        std::make_shared<const Eigen::MatrixXd>(random_matrix(1, 1));
+    second_blocks[{physical[i], physical[physical.size() - 1 - i], total}] =
+        std::make_shared<const Eigen::MatrixXd>(random_matrix(1, 1));
+  }
+  auto first = std::make_shared<const MPSSite>(
+      std::make_shared<const MPSSite::TensorVariant>(
+          SBT({symmetry, symmetry, symmetry}, first_extents, first_blocks)),
+      MPSSite::SectorOrders{{{vacuum}, physical, physical}});
+  auto second = std::make_shared<const MPSSite>(
+      std::make_shared<const MPSSite::TensorVariant>(
+          SBT({symmetry, symmetry, symmetry}, second_extents, second_blocks)),
+      MPSSite::SectorOrders{{physical, physical, {total}}});
+  const MPSContainer original({first, second}, orbitals);
+  H5::FileAccPropList access;
+  access.setCore(4096, false);
+  H5::H5File file("mps_n_sz_in_memory.h5", H5F_ACC_TRUNC,
+                  H5::FileCreatPropList::DEFAULT, access);
+  original.to_hdf5(file);
+  const std::shared_ptr<const MPSContainer> json_copy =
+      MPSContainer::from_json(original.to_json());
+  const std::shared_ptr<const MPSContainer> hdf_copy =
+      MPSContainer::from_hdf5(file);
+  const auto left = std::get<Eigen::MatrixXd>(first->to_dense());
+  const auto right = std::get<Eigen::MatrixXd>(second->to_dense());
+  const std::string states = "0ud2";
+  for (const auto* copy : {&original, json_copy.get(), hdf_copy.get()}) {
+    for (std::size_t slot = 0; slot < 3; ++slot) {
+      EXPECT_EQ(*std::get<SBT>(copy->sites()[0]->tensor()).symmetries()[slot],
+                *symmetry);
+    }
+    std::size_t nonzero = 0;
+    for (Eigen::Index p0 = 0; p0 < 4; ++p0) {
+      for (Eigen::Index p1 = 0; p1 < 4; ++p1) {
+        double expected = 0.0;
+        for (Eigen::Index bond = 0; bond < 4; ++bond) {
+          expected += left(p0, bond) * right(bond * 4 + p1, 0);
+        }
+        const char s0 = states[static_cast<std::size_t>(p0)];
+        const char s1 = states[static_cast<std::size_t>(p1)];
+        if ((s0 == 'd' || s0 == '2') && (s1 == 'u' || s1 == '2')) {
+          expected = -expected;
+        }
+        if (expected != 0.0) ++nonzero;
+        EXPECT_NEAR(std::get<double>(copy->get_coefficient(
+                        Configuration::from_spin_half_string({s0, s1}))),
+                    expected, testing::wf_tolerance);
+      }
+    }
+    EXPECT_EQ(nonzero, 4u);
+  }
+}

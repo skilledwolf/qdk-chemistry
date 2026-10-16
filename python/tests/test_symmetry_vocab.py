@@ -88,6 +88,20 @@ class TestParticleNumberValue:
         assert product.axis(sym.AxisName.ParticleNumber).equivalent() is False
 
 
+class TestSpinProjectionAxis:
+    """Tests for the spin axis that carries both parities of 2Ms."""
+
+    def test_labels_and_admission(self):
+        """Every 2Ms in the range is admitted, unlike a spin multiplet axis."""
+        axis = sym.axes.spin_projection(2)
+        assert axis.name() == sym.AxisName.Spin
+        assert axis.equivalent() is False
+        assert [label.value() for label in axis.labels()] == [-2, -1, 0, 1, 2]
+        assert axis.admits(sym.axes.spin_value(1))
+        assert not axis.admits(sym.axes.spin_value(3))
+        assert not sym.axes.spin(2, False).admits(sym.axes.spin_value(1))
+
+
 class TestSymmetryAxis:
     """Tests for SymmetryAxis construction and queries."""
 

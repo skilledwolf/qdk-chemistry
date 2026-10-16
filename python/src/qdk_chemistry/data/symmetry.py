@@ -8,6 +8,9 @@ below) and their index-set companion :class:`SymmetryBlockedIndexSet`.
 
 The spin axis (:math:`S_z`) supports restricted (RHF/ROHF) and unrestricted
 (UHF) references. The particle-number axis labels nonnegative particle counts.
+:func:`axes.spin_projection` builds a spin axis with every :math:`2 M_s` in a
+range, which together with :func:`axes.particle_number` labels :math:`(N, S_z)`
+sectors, for example the indices of a matrix product state.
 
 Exposed symmetry types are:
 

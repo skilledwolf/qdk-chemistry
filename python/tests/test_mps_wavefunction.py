@@ -5,10 +5,12 @@
 # Licensed under the MIT License. See LICENSE.txt in the project root for license information.
 # --------------------------------------------------------------------------------------------
 
+import itertools
+
 import numpy as np
 import pytest
 
-from qdk_chemistry.data import ModelOrbitals, MPSContainer, MPSSite, Wavefunction
+from qdk_chemistry.data import Configuration, ModelOrbitals, MPSContainer, MPSSite, Wavefunction
 from qdk_chemistry.data import symmetry as sym
 
 
@@ -138,3 +140,58 @@ def test_invalid_constructor_arguments():
         MPSSite(None, [label], [label], [label])
     with pytest.raises(ValueError, match="MPS requires nonempty sites"):
         MPSContainer([], ModelOrbitals(1))
+
+
+def test_particle_number_and_spin_blocked_sites(tmp_path):
+    """(N, 2Ms) sectors label the physical and bond indices of a spinful MPS."""
+    product = sym.SymmetryProduct([sym.axes.particle_number(4), sym.axes.spin_projection(2)])
+
+    def label(number, two_ms):
+        return sym.SymmetryLabel([sym.axes.particle_number_value(number), sym.axes.spin_value(two_ms)])
+
+    physical = [label(0, 0), label(1, 1), label(1, -1), label(2, 0)]
+    vacuum, total = label(0, 0), label(2, 0)
+    rng = np.random.default_rng(5)
+    first_values, second_values = rng.random(4), rng.random(4)
+    # Charges accumulate from the left, so each first-site sector pairs with its complement.
+    first = MPSSite(
+        sym.SymmetryBlockedTensorRank3(
+            [product] * 3,
+            [{vacuum: 1}, dict.fromkeys(physical, 1), dict.fromkeys(physical, 1)],
+            [
+                ((vacuum, sector, sector), np.array([[value]]))
+                for sector, value in zip(physical, first_values, strict=True)
+            ],
+        ),
+        [vacuum],
+        physical,
+        physical,
+    )
+    second = MPSSite(
+        sym.SymmetryBlockedTensorRank3(
+            [product] * 3,
+            [dict.fromkeys(physical, 1), dict.fromkeys(physical, 1), {total: 1}],
+            [
+                ((sector, partner, total), np.array([[value]]))
+                for sector, partner, value in zip(physical, reversed(physical), second_values, strict=True)
+            ],
+        ),
+        physical,
+        physical,
+        [total],
+    )
+    original = Wavefunction(MPSContainer([first, second], ModelOrbitals(2)))
+    path = tmp_path / "n_sz.wavefunction.h5"
+    original.to_file(path, "hdf5")
+    # |du> creates b0 a1, one exchange away from determinant order a1 b0.
+    expected = {
+        "02": first_values[0] * second_values[0],
+        "ud": first_values[1] * second_values[1],
+        "du": -first_values[2] * second_values[2],
+        "20": first_values[3] * second_values[3],
+    }
+    for wavefunction in [original, Wavefunction.from_json(original.to_json()), Wavefunction.from_file(path, "hdf5")]:
+        for states in itertools.product("0ud2", repeat=2):
+            state = "".join(states)
+            actual = wavefunction.get_coefficient(Configuration.from_spin_half_string(state))
+            assert actual == pytest.approx(expected.get(state, 0.0), abs=1e-14), state

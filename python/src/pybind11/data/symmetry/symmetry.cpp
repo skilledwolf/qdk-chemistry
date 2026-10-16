@@ -214,6 +214,10 @@ void bind_symmetry(py::module& symmetry) {
   axes.def("particle_number", &axes::particle_number, py::arg("maximum_number"),
            "Build a particle-number axis carrying labels from zero through the "
            "maximum.");
+  axes.def("spin_projection", &axes::spin_projection, py::arg("maximum_two_ms"),
+           "Build a non-equivalent spin axis carrying every 2*Ms from "
+           "-maximum_two_ms through maximum_two_ms in steps of one, for "
+           "(N, Sz) sectors such as matrix product state bonds.");
   axes.def(
       "alpha",
       []() { return std::const_pointer_cast<SpinValue>(axes::alpha()); },

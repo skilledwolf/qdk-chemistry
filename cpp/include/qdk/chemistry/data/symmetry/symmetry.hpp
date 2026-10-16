@@ -817,6 +817,23 @@ SymmetryAxis spin(unsigned two_s, bool equivalent = true);
 SymmetryAxis particle_number(std::size_t maximum_number);
 
 /**
+ * @brief Build a non-equivalent spin axis carrying every @f$2 M_s@f$ from
+ * @f$-@f$ @p maximum_two_ms through @p maximum_two_ms in steps of one.
+ *
+ * Unlike @ref spin, which lists the @f$2S+1@f$ projections of one multiplet,
+ * this axis mixes both parities of @f$2 M_s@f$. It labels Abelian
+ * @f$S_z@f$ sectors whose particle number varies, such as the physical and
+ * bond indices of a matrix product state blocked by @f$(N, S_z)@f$.
+ *
+ * @param maximum_two_ms Largest @f$|2 M_s|@f$ carried by the axis.
+ * @return A fully populated, non-equivalent @ref SymmetryAxis named
+ *         @ref AxisName::Spin.
+ * @throws std::invalid_argument if @p maximum_two_ms exceeds the range of
+ *         @c int.
+ */
+SymmetryAxis spin_projection(unsigned maximum_two_ms);
+
+/**
  * @brief Interned shared spin-½ value with @f$2 M_s = +1@f$.
  * @return Reference to the global @f$\alpha@f$ instance; safe to capture
  *         by @c shared_ptr.

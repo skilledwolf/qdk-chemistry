@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <fstream>
+#include <limits>
 #include <qdk/chemistry/data/symmetry/symmetry.hpp>
 #include <qdk/chemistry/utils/logger.hpp>
 #include <sstream>
@@ -686,6 +687,20 @@ SymmetryAxis particle_number(std::size_t maximum_number) {
     labels.push_back(particle_number_value(number));
   }
   return SymmetryAxis(AxisName::ParticleNumber, std::move(labels), false);
+}
+
+SymmetryAxis spin_projection(unsigned maximum_two_ms) {
+  if (maximum_two_ms > static_cast<unsigned>(std::numeric_limits<int>::max())) {
+    throw std::invalid_argument("Spin projection exceeds the 2*Ms range.");
+  }
+  const auto maximum = static_cast<int>(maximum_two_ms);
+  std::vector<std::shared_ptr<const SymmetryAxisValue>> labels;
+  labels.reserve(2 * static_cast<std::size_t>(maximum_two_ms) + 1);
+  for (int two_ms = -maximum;; ++two_ms) {
+    labels.push_back(spin_value(two_ms));
+    if (two_ms == maximum) break;
+  }
+  return SymmetryAxis(AxisName::Spin, std::move(labels), false);
 }
 
 }  // namespace axes

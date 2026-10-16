@@ -5,6 +5,7 @@
 #include <gtest/gtest.h>
 
 #include <filesystem>
+#include <limits>
 #include <qdk/chemistry/data/symmetry/symmetry.hpp>
 #include <stdexcept>
 #include <unordered_map>
@@ -87,6 +88,25 @@ TEST(SymmetryVocabTest, RoundTripParticleNumberJsonAndHash) {
   EXPECT_TRUE(restored_label.has(AxisName::ParticleNumber));
   std::unordered_map<SymmetryLabel, std::size_t> sectors{{label, 7u}};
   EXPECT_EQ(sectors.at(restored_label), 7u);
+}
+
+TEST(SymmetryVocabTest, SpinProjectionAxisCarriesBothParities) {
+  const auto axis = axes::spin_projection(2);
+  EXPECT_EQ(axis.name(), AxisName::Spin);
+  EXPECT_FALSE(axis.equivalent());
+  ASSERT_EQ(axis.labels().size(), 5u);
+  for (int two_ms = -2; two_ms <= 2; ++two_ms) {
+    EXPECT_TRUE(axis.labels()[static_cast<std::size_t>(two_ms + 2)]->equals(
+        SpinValue(two_ms)));
+    EXPECT_TRUE(axis.admits(SpinValue(two_ms)));
+  }
+  EXPECT_FALSE(axis.admits(SpinValue(3)));
+  EXPECT_FALSE(axes::spin(2, false).admits(SpinValue(1)));
+  EXPECT_EQ(axes::spin_projection(0).labels().size(), 1u);
+  const auto restored = SymmetryAxis::from_json(axis.to_json());
+  EXPECT_EQ(*restored, axis);
+  EXPECT_THROW(axes::spin_projection(std::numeric_limits<unsigned>::max()),
+               std::invalid_argument);
 }
 
 TEST(SymmetryVocabTest, SymmetriesAxisLookup) {
