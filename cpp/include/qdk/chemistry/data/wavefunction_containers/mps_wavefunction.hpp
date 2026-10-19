@@ -286,7 +286,9 @@ class MPSContainer : public WavefunctionContainer {
    * O(num_sites * D^2), and the result is multiplied by the parity of the
    * permutation that sorts the chain-ordered creation operators into
    * determinant order (see the class description). Spinless modes follow the
-   * same rule. The stored scale and phase are preserved.
+   * same rule, so binary sites are fermionic; a non-fermionic qubit chain
+   * agrees with this amplitude only for the identity site order. The stored
+   * scale and phase are preserved.
    * @param det Active-space configuration in the sites' physical encoding.
    * @return Real or complex amplitude; zero if a local state lies outside a
    * site's physical basis or a mode beyond the active sites is occupied.
