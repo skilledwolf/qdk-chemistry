@@ -358,8 +358,8 @@ class MPSContainer : public WavefunctionContainer {
    * traced RDM is hashed only without its blocked RDM, single-orbital
    * entropies only without both real blocked RDMs, and two-orbital entropies
    * never. Such supplied values must be consistent with the data they derive
-   * from. Provenance is hashed like other supplied data, with numbers compared
-   * by value.
+   * from. Provenance describes how the state was produced, not the state, and
+   * is not hashed.
    * @param ctx Content-hash context to update.
    */
   void hash_update(qdk::chemistry::utils::HashContext& ctx) const override;

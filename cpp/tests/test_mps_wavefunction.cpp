@@ -895,8 +895,8 @@ TEST_F(MPSContainerTest, SuppliedPropertiesDefineContentHash) {
       std::nullopt, std::nullopt, std::nullopt, std::nullopt, std::nullopt,
       std::nullopt, std::nullopt, std::nullopt, OrbitalEntropies{},
       nlohmann::json{{"producer", "test"}});
-  EXPECT_EQ(hash(*MPSContainer::from_json(with_provenance.to_json())),
-            hash(with_provenance));
+  // Provenance describes how the state was produced, not the state.
+  EXPECT_EQ(hash(with_provenance), hash(MPSContainer(sites, orbitals)));
   const std::vector<std::string> hashes{
       hash(MPSContainer(sites, orbitals)),
       hash(MPSContainer(sites, orbitals, nullptr, nullptr, std::nullopt, {},
@@ -907,8 +907,7 @@ TEST_F(MPSContainerTest, SuppliedPropertiesDefineContentHash) {
                         std::nullopt, std::nullopt, std::nullopt, two_rdm)),
       hash(with_entropies(single)),
       hash(with_entropies(other_single)),
-      hash(with_entropies(mutual)),
-      hash(with_provenance)};
+      hash(with_entropies(mutual))};
   EXPECT_EQ(std::set<std::string>(hashes.begin(), hashes.end()).size(),
             hashes.size());
 }
@@ -987,7 +986,7 @@ TEST_F(MPSContainerTest, ContentHashIgnoresLazilyDerivedProperties) {
   }
 }
 
-TEST_F(MPSContainerTest, HashKeepsUnderivableEntropiesAndNumberValues) {
+TEST_F(MPSContainerTest, HashKeepsUnderivableEntropies) {
   auto hash = [](const MPSContainer& container) {
     return Wavefunction(container.clone()).content_hash();
   };
@@ -1003,20 +1002,6 @@ TEST_F(MPSContainerTest, HashKeepsUnderivableEntropiesAndNumberValues) {
   };
   // Complex RDMs do not determine single-orbital entropies.
   EXPECT_NE(hash(with_single(0.7)), hash(with_single(0.6)));
-
-  auto with_provenance = [&](const nlohmann::json& provenance) {
-    return MPSContainer(sites, orbitals, nullptr, nullptr, std::nullopt, {},
-                        std::nullopt, std::nullopt, std::nullopt, std::nullopt,
-                        std::nullopt, std::nullopt, std::nullopt, std::nullopt,
-                        std::nullopt, OrbitalEntropies{}, provenance);
-  };
-  EXPECT_EQ(hash(with_provenance({{"bond_dimension", 512}})),
-            hash(with_provenance({{"bond_dimension", 512.0}})));
-  EXPECT_NE(hash(with_provenance({{"bond_dimension", 512}})),
-            hash(with_provenance({{"bond_dimension", 513}})));
-  // Integers beyond double precision stay distinct.
-  EXPECT_NE(hash(with_provenance({{"seed", 9007199254740992}})),
-            hash(with_provenance({{"seed", 9007199254740993}})));
 }
 
 TEST_F(MPSContainerTest, RejectsMalformedSerializedEntropies) {

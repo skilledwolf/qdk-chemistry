@@ -322,8 +322,8 @@ def test_supplied_properties_define_content_hash(site_data):
     other = Wavefunction(MPSContainer(sites, ModelOrbitals(2), one_rdm_spin_traced=2 * np.eye(2)))
     entropies = Wavefunction(MPSContainer(sites, ModelOrbitals(2), entropies={"single_orbital": np.array([0.3, 0.7])}))
     provenance = Wavefunction(MPSContainer(sites, ModelOrbitals(2), provenance={"producer": "test"}))
-    assert Wavefunction.from_json(provenance.to_json()).content_hash() == provenance.content_hash()
-    hashes = [wavefunction.content_hash() for wavefunction in (plain, supplied, other, entropies, provenance)]
+    assert provenance.content_hash() == plain.content_hash()
+    hashes = [wavefunction.content_hash() for wavefunction in (plain, supplied, other, entropies)]
     assert len(set(hashes)) == len(hashes)
 
     one = 0.5 * np.eye(2)

@@ -4,7 +4,6 @@
 
 #include <algorithm>
 #include <array>
-#include <cmath>
 #include <complex>
 #include <cstdint>
 #include <limits>
@@ -283,26 +282,6 @@ Scalar contract_amplitude(const std::vector<MPSContainer::SitePtr>& sites,
     left = std::move(right);
   }
   return left(0);
-}
-
-/**
- * @brief Copy a JSON value with integral floating-point numbers stored as
- * integers, so 512 and 512.0 serialize alike without rounding large integers.
- * @param value JSON value to normalize.
- * @return Value whose numbers serialize alike exactly when their values agree.
- */
-nlohmann::json canonical_numbers(const nlohmann::json& value) {
-  if (value.is_number_float()) {
-    const double number = value.get<double>();
-    if (std::trunc(number) == number && std::abs(number) < 0x1p63) {
-      return static_cast<std::int64_t>(number);
-    }
-    return value;
-  }
-  if (!value.is_structured()) return value;
-  auto result = value;
-  for (auto& item : result) item = canonical_numbers(item);
-  return result;
 }
 
 }  // namespace
@@ -1021,7 +1000,6 @@ void MPSContainer::hash_update(qdk::chemistry::utils::HashContext& ctx) const {
     hash_value(ctx, _entropies.single_orbital);
   }
   hash_value(ctx, _entropies.mutual_information);
-  hash_value(ctx, canonical_numbers(_provenance).dump());
 }
 
 std::unique_ptr<WavefunctionContainer> MPSContainer::clone() const {
